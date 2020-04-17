@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import copy
 import itertools
 
@@ -41,31 +42,13 @@ class DistributedDataParallel(Module):
 
     The batch size should be larger than the number of GPUs used locally.
 
-    See also: :ref:`distributed-basics` and :ref:`cuda-nn-dataparallel-instead`.
+    See also: :ref:`distributed-basics` and :ref:`cuda-nn-ddp-instead`.
     The same constraints on input as in :class:`torch.nn.DataParallel` apply.
 
     Creation of this class requires that ``torch.distributed`` to be already
     initialized, by calling :func:`torch.distributed.init_process_group`.
 
-    ``DistributedDataParallel`` can be used in the following two ways:
-
-    (1) Single-Process Multi-GPU
-
-    In this case, a single process will be
-    spawned on each host/node and each process will operate on all the GPUs
-    of the node where it's running. To use ``DistributedDataParallel`` in
-    this way, you can simply construct the model as the following:
-
-        >>> torch.distributed.init_process_group(backend="nccl")
-        >>> model = DistributedDataParallel(model) # device_ids will include all GPU devices by default
-
-    (2) Multi-Process Single-GPU
-
-    This is the highly recommended way to use ``DistributedDataParallel``, with
-    multiple processes, each of which operates on a single GPU. This is
-    currently the fastest approach to do data parallel training using PyTorch
-    and applies to both single-node(multi-GPU) and multi-node data
-    parallel training. It is proven to be significantly faster than
+    ``DistributedDataParallel`` is proven to be significantly faster than
     :class:`torch.nn.DataParallel` for single-node multi-GPU data
     parallel training.
 
@@ -233,6 +216,11 @@ class DistributedDataParallel(Module):
 
         super(DistributedDataParallel, self).__init__()
 
+        assert any((p.requires_grad for p in module.parameters())), (
+            "DistributedDataParallel is not needed when a module "
+            "doesn't have any parameter that requires a gradient."
+        )
+
         self.is_multi_device_module = len({p.device for p in module.parameters()}) > 1
         self.is_cuda = all([p.device.type == 'cuda' for p in module.parameters()])
 
@@ -272,6 +260,8 @@ class DistributedDataParallel(Module):
         self.module = module
         self.broadcast_buffers = broadcast_buffers
         self.find_unused_parameters = find_unused_parameters
+        self.require_backward_grad_sync = True
+        self.require_forward_param_sync = True
 
         if check_reduction:
             # This argument is no longer used since the reducer
@@ -307,6 +297,22 @@ class DistributedDataParallel(Module):
         (5) passing a handle of DDP to SyncBatchNorm Layer
         """
         if self.device_ids and len(self.device_ids) > 1:
+
+            import warnings
+            warnings.warn(
+                "Single-Process Multi-GPU is not the recommended mode for "
+                "DDP. In this mode, each DDP instance operates on multiple "
+                "devices and creates multiple module replicas within one "
+                "process. The overhead of scatter/gather and GIL contention "
+                "in every forward pass can slow down training. "
+                "Please consider using one DDP instance per device or per "
+                "module replica by explicitly setting device_ids or "
+                "CUDA_VISIBLE_DEVICES. "
+                "NB: There is a known issue in nn.parallel.replicate that "
+                "prevents a single DDP instance to operate on multiple model "
+                "replicas."
+            )
+
             # only create replicas for single-device CUDA modules
             #
             # TODO: we don't need to replicate params in here. they're always going to
@@ -325,9 +331,34 @@ class DistributedDataParallel(Module):
         self.modules_params = [list(m.parameters()) for m in self._module_copies]
         self.modules_buffers = [list(m.buffers()) for m in self._module_copies]
 
-        param_list = [
-            list(filter(lambda p: p.requires_grad, module.parameters()))
-            for module in self._module_copies]
+        # Build tuple of (module, parameter) for all parameters that require grads.
+        modules_and_parameters = [
+            [
+                (module, parameter)
+                for module in replica.modules()
+                for parameter in filter(
+                    lambda parameter: parameter.requires_grad,
+                    module.parameters(recurse=False))
+            ] for replica in self._module_copies]
+
+        # Build list of parameters.
+        parameters = [
+            list(parameter for _, parameter in replica)
+            for replica in modules_and_parameters]
+
+        # Checks if a module will produce a sparse gradient.
+        def produces_sparse_gradient(module):
+            if isinstance(module, torch.nn.Embedding):
+                return module.sparse
+            if isinstance(module, torch.nn.EmbeddingBag):
+                return module.sparse
+            return False
+
+        # Build list of booleans indicating whether or not to expect sparse
+        # gradients for the corresponding parameters.
+        expect_sparse_gradient = [
+            list(produces_sparse_gradient(module) for module, _ in replica)
+            for replica in modules_and_parameters]
 
         # The bucket size limit is specified in the constructor.
         # Additionally, we allow for a single small bucket for parameters
@@ -335,16 +366,18 @@ class DistributedDataParallel(Module):
         # a much larger bucket, adding unnecessary latency after gradient
         # computation finishes. Experiments showed 1MB is a reasonable value.
         bucket_indices = dist._compute_bucket_assignment_by_size(
-            param_list[0],
-            [1024 * 1024, self.bucket_bytes_cap])
+            parameters[0],
+            [1024 * 1024, self.bucket_bytes_cap],
+            expect_sparse_gradient[0])
 
         # Note: reverse list of buckets because we want to approximate the
         # order in which their gradients are produced, and assume they
         # are used in the forward pass in the order they are defined.
         self.reducer = dist.Reducer(
-            param_list,
+            parameters,
             list(reversed(bucket_indices)),
-            self.process_group)
+            self.process_group,
+            expect_sparse_gradient)
 
         # passing a handle to torch.nn.SyncBatchNorm layer
         self._passing_sync_batchnorm_handle(self._module_copies)
@@ -360,6 +393,8 @@ class DistributedDataParallel(Module):
         # If serializable, then the process group should be the default one
         self.process_group = _get_default_group()
         super(DistributedDataParallel, self).__setstate__(state)
+        self.__dict__.setdefault('require_forward_param_sync', True)
+        self.__dict__.setdefault('require_backward_grad_sync', True)
         self._ddp_init_helper()
 
     def _check_default_group(self):
@@ -377,8 +412,33 @@ class DistributedDataParallel(Module):
                                "init_process_group and have not passed "
                                "process_group argument to DDP constructor")
 
+    @contextmanager
+    def no_sync(self):
+        r"""
+        A context manager to disable gradient synchronizations across DDP
+        processes. Within this context, gradients will be accumulated on module
+        variables, which will later be synchronized in the first
+        forward-backward pass exiting the context.
+
+        Example::
+
+            >>> ddp = torch.nn.DistributedDataParallel(model, pg)
+            >>> with ddp.no_sync():
+            ...   for input in inputs:
+            ...     ddp(input).backward()  # no synchronization, accumulate grads
+            ... ddp(another_input).backward()  # synchronize grads
+        """
+        old_require_backward_grad_sync = self.require_backward_grad_sync
+        self.require_backward_grad_sync = False
+        try:
+            yield
+        finally:
+            self.require_backward_grad_sync = old_require_backward_grad_sync
+
     def forward(self, *inputs, **kwargs):
-        self._sync_params()
+        if self.require_forward_param_sync:
+            self._sync_params()
+
         if self.device_ids:
             inputs, kwargs = self.scatter(inputs, kwargs, self.device_ids)
             if len(self.device_ids) == 1:
@@ -389,7 +449,8 @@ class DistributedDataParallel(Module):
         else:
             output = self.module(*inputs, **kwargs)
 
-        if torch.is_grad_enabled():
+        if torch.is_grad_enabled() and self.require_backward_grad_sync:
+            self.require_forward_param_sync = True
             # We'll return the output object verbatim since it is a freeform
             # object. We need to find any tensors in this object, though,
             # because we need to figure out which parameters were used during
@@ -399,6 +460,9 @@ class DistributedDataParallel(Module):
                 self.reducer.prepare_for_backward(list(_find_tensors(output)))
             else:
                 self.reducer.prepare_for_backward([])
+        else:
+            self.require_forward_param_sync = False
+
         return output
 
     def scatter(self, inputs, kwargs, device_ids):

@@ -17,7 +17,7 @@
  #include <cstring>
  #include <iterator>
  #include <list>
- #include "./llvmMathExtras.h"
+ #include <c10/util/llvmMathExtras.h>
 
  namespace c10 {
 
@@ -192,7 +192,6 @@
      bool changed = false;
      bool allzero = true;
 
-     BecameZero = false;
      for (unsigned i = 0; i < BITWORDS_PER_ELEMENT; ++i) {
        BitWord old = changed ? 0 : Bits[i];
 
@@ -215,7 +214,6 @@
      bool changed = false;
      bool allzero = true;
 
-     BecameZero = false;
      for (unsigned i = 0; i < BITWORDS_PER_ELEMENT; ++i) {
        BitWord old = changed ? 0 : Bits[i];
 
@@ -237,7 +235,6 @@
                                 bool &BecameZero) {
      bool allzero = true;
 
-     BecameZero = false;
      for (unsigned i = 0; i < BITWORDS_PER_ELEMENT; ++i) {
        Bits[i] = RHS1.Bits[i] & ~RHS2.Bits[i];
        if (Bits[i] != 0)
@@ -580,6 +577,11 @@
    }
 
    // Intersect our bitmap with the RHS and return true if ours changed.
+   bool operator-=(const SparseBitVector &RHS) {
+     return intersectWithComplement(RHS);
+   }
+
+   // Intersect our bitmap with the RHS and return true if ours changed.
    bool operator&=(const SparseBitVector &RHS) {
      if (this == &RHS)
        return false;
@@ -867,5 +869,26 @@
    return Result;
  }
 
+ template <unsigned ElementSize>
+ std::ostream& operator<<(std::ostream& stream, const SparseBitVector<ElementSize>& vec) {
 
- } // end namespace llvm
+   bool first = true;
+   stream << "{";
+   for (auto el : vec)
+   {
+     if (first)
+     {
+       first = false;
+     }
+     else
+     {
+       stream << ", ";
+     }
+     stream << el;
+   }
+   stream << "}";
+   return stream;
+ }
+
+
+} // end namespace c10

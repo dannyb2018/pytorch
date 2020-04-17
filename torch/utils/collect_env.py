@@ -1,6 +1,7 @@
 # This script outputs relevant system environment info
 # Run it with `python collect_env.py`.
 from __future__ import absolute_import, division, print_function, unicode_literals
+import locale
 import re
 import subprocess
 import sys
@@ -42,8 +43,9 @@ def run(command):
     output, err = p.communicate()
     rc = p.returncode
     if PY3:
-        output = output.decode("utf-8")
-        err = err.decode("utf-8")
+        enc = locale.getpreferredencoding()
+        output = output.decode(enc)
+        err = err.decode(enc)
     return rc, output.strip(), err.strip()
 
 
@@ -68,9 +70,9 @@ def run_and_parse_first_match(run_lambda, command, regex):
 
 def get_conda_packages(run_lambda):
     if get_platform() == 'win32':
-        grep_cmd = r'findstr /R "torch soumith mkl magma"'
+        grep_cmd = r'findstr /R "torch numpy cudatoolkit soumith mkl magma"'
     else:
-        grep_cmd = r'grep "torch\|soumith\|mkl\|magma"'
+        grep_cmd = r'grep "torch\|numpy\|cudatoolkit\|soumith\|mkl\|magma"'
     conda = os.environ.get('CONDA_EXE', 'conda')
     out = run_and_read_all(run_lambda, conda + ' list | ' + grep_cmd)
     if out is None:
@@ -217,6 +219,8 @@ def get_os(run_lambda):
 
 
 def get_pip_packages(run_lambda):
+    """Returns `pip list` output. Note: will also find conda-installed pytorch
+    and numpy packages."""
     # People generally have `pip` as `pip` or `pip3`
     def run_with_pip(pip):
         if get_platform() == 'win32':

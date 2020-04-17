@@ -18,49 +18,65 @@ PyTorch is an optimized tensor library for deep learning using GPUs and CPUs.
    notes/*
 
 .. toctree::
-  :glob:
-  :maxdepth: 1
-  :caption: Community
+   :maxdepth: 1
+   :caption: Language Bindings
 
-  community/*
+   C++ API <https://pytorch.org/cppdocs/>
+   packages
 
 .. toctree::
    :maxdepth: 1
-   :caption: Package Reference
+   :caption: Python API
 
    torch
+   nn
+   nn.functional
    tensors
    tensor_attributes
-   type_info
-   sparse
-   cuda
-   storage
-   nn
-   optim
+   tensor_view
    torch.autograd <autograd>
+   cuda
+   torch.cuda.amp <amp>
    torch.distributed <distributed>
    torch.distributions <distributions>
    torch.hub <hub>
    torch.jit <jit>
-   torch.multiprocessing <multiprocessing>
+   nn.init
+   onnx
+   optim
+   quantization
+   rpc/index.rst
+   torch.random <random>
+   sparse
+   storage
    torch.utils.bottleneck <bottleneck>
    torch.utils.checkpoint <checkpoint>
    torch.utils.cpp_extension <cpp_extension>
    torch.utils.data <data>
    torch.utils.dlpack <dlpack>
    torch.utils.model_zoo <model_zoo>
-   torch.utils.tensorboard (experimental) <tensorboard>
-   onnx
+   torch.utils.tensorboard <tensorboard>
+   type_info
+   named_tensor
+   name_inference
    torch.__config__ <__config__>
-   torch.distributed.deprecated <distributed_deprecated>
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Libraries
+   
+   PyTorch on XLA Devices <http://pytorch.org/xla/>
+   PyTorch Elastic (torchelastic) <https://pytorch.org/elastic/>
+   torchaudio <https://pytorch.org/audio>
+   torchtext <https://pytorch.org/text>
+   torchvision/index
 
 .. toctree::
    :glob:
-   :maxdepth: 2
-   :caption: torchvision Reference
+   :maxdepth: 1
+   :caption: Community
 
-   torchvision/index
-
+   community/*
 
 Indices and tables
 ==================

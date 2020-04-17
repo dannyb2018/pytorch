@@ -428,6 +428,7 @@ class HypothesisTestCase(test_util.TestCase):
         threshold=0.005,
         stepsize=0.05,
         input_device_options=None,
+        ensure_outputs_are_inferred=False,
     ):
         """
         Implements a standard numerical gradient checker for the operator
@@ -455,7 +456,8 @@ class HypothesisTestCase(test_util.TestCase):
         res, grad, grad_estimated = gc.CheckSimple(
             op, inputs, outputs_to_check, outputs_with_grads,
             grad_ops=grad_ops,
-            input_device_options=input_device_options
+            input_device_options=input_device_options,
+            ensure_outputs_are_inferred=ensure_outputs_are_inferred,
         )
         self.assertEqual(grad.shape, grad_estimated.shape)
         self.assertTrue(
@@ -510,7 +512,12 @@ class HypothesisTestCase(test_util.TestCase):
                     np.testing.assert_allclose(indices, ref_indices,
                                                atol=1e-4, rtol=1e-4)
 
-    def _assertInferTensorChecks(self, name, shapes, types, output):
+    def _assertInferTensorChecks(self, name, shapes, types, output,
+                                 ensure_output_is_inferred=False):
+        self.assertTrue(
+            not ensure_output_is_inferred or (name in shapes),
+            'Shape for {0} was not inferred'.format(name))
+
         if name not in shapes:
             # No inferred shape or type available
             return
@@ -550,7 +557,7 @@ class HypothesisTestCase(test_util.TestCase):
             # Temporarily catch these assertion errors when validating
             # inferred shape and type info
             logging.warning(str(e))
-            if os.getenv('CAFFE2_ASSERT_SHAPEINFERENCE') == '1':
+            if os.getenv('CAFFE2_ASSERT_SHAPEINFERENCE') == '1' or ensure_output_is_inferred:
                 raise e
 
     def assertReferenceChecks(
@@ -565,6 +572,7 @@ class HypothesisTestCase(test_util.TestCase):
         grad_reference=None,
         atol=None,
         outputs_to_check=None,
+        ensure_outputs_are_inferred=False,
     ):
         """
         This runs the reference Python function implementation
@@ -613,7 +621,7 @@ class HypothesisTestCase(test_util.TestCase):
                 # Temporarily catch runtime errors when inferring shape
                 # and type info
                 logging.warning(str(e))
-                if os.getenv('CAFFE2_ASSERT_SHAPEINFERENCE') == '1':
+                if os.getenv('CAFFE2_ASSERT_SHAPEINFERENCE') == '1' or ensure_outputs_are_inferred:
                     raise e
             workspace.RunNetOnce(net)
             reference_outputs = reference(*inputs)
@@ -643,7 +651,8 @@ class HypothesisTestCase(test_util.TestCase):
                     )
                 if test_shape_inference:
                     self._assertInferTensorChecks(
-                        output_blob_name, shapes, types, output)
+                        output_blob_name, shapes, types, output,
+                        ensure_output_is_inferred=ensure_outputs_are_inferred)
                 outs.append(output)
             if grad_reference is not None:
                 assert output_to_grad is not None, \

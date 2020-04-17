@@ -26,14 +26,14 @@ Tensor max_unpooling2d_forward_out_cpu_frame(
   int64_t inputHeight = input.size(dimh);
   int64_t inputWidth = input.size(dimw);
 
-  auto* rawInput = input.data<scalar_t>();
-  auto* rawIndices = indices.data<int64_t>();
-  auto* rawOutput = output.data<scalar_t>();
+  auto* rawInput = input.data_ptr<scalar_t>();
+  auto* rawIndices = indices.data_ptr<int64_t>();
+  auto* rawOutput = output.data_ptr<scalar_t>();
 
   for (int64_t n = 0; n < numBatch; n++) {
     int64_t nOutputOffset = n * numChannels * owidth * oheight;
     int64_t nInputOffset = n * numChannels * inputWidth * inputHeight;
-    int64_t k;
+    int64_t k = 0;
     bool has_error = false;
     int64_t error_index = 0;
 #pragma omp parallel for private(k)
@@ -77,30 +77,29 @@ Tensor& max_unpooling2d_forward_out_cpu(
     Tensor& output,
     const Tensor& self_,
     const Tensor& indices_,
-    IntList output_size) {
+    IntArrayRef output_size) {
   auto oheight = output_size[0];
   auto owidth = output_size[1];
-  AT_CHECK(output.is_contiguous(), "output must be contiguous");
-  AT_CHECK(
+  TORCH_CHECK(output.is_contiguous(), "output must be contiguous");
+  TORCH_CHECK(
       indices_.scalar_type() == at::ScalarType::Long,
       "elements in indices should be type int64");
-  AT_CHECK(
+  TORCH_CHECK(
       output_size.size() == 2,
       "There should be exactly two elements (height, width) in output_size");
-  AT_CHECK(
+  TORCH_CHECK(
       (self_.ndimension() == 3 || self_.ndimension() == 4),
       "Input to max_unpooling2d should be a 3d or 4d Tensor");
-  AT_CHECK(
+  TORCH_CHECK(
       self_.sizes() == indices_.sizes(),
       "Shape of indices should match shape of input");
 
-  AT_CHECK(self_.numel() > 0, "Input must be non-empty");
+  TORCH_CHECK(self_.numel() > 0, "Input must be non-empty");
 
   auto self = self_.contiguous();
   auto indices = indices_.contiguous();
 
   if (self.ndimension() == 3) {
-    int64_t numBatch = 1;
     int64_t numChannels = self.size(0);
     output.resize_({numChannels, oheight, owidth});
   } else {
@@ -111,7 +110,7 @@ Tensor& max_unpooling2d_forward_out_cpu(
   output.zero_();
 
   AT_DISPATCH_FLOATING_TYPES(
-      self.type(), "max_unpooling2d_forward_out_cpu_frame", ([&] {
+      self.scalar_type(), "max_unpooling2d_forward_out_cpu_frame", ([&] {
         max_unpooling2d_forward_out_cpu_frame<scalar_t>(
             output, self, indices, oheight, owidth);
       }));
@@ -121,7 +120,7 @@ Tensor& max_unpooling2d_forward_out_cpu(
 Tensor max_unpooling2d_forward_cpu(
     const Tensor& self,
     const Tensor& indices,
-    IntList output_size) {
+    IntArrayRef output_size) {
   auto output = at::empty({0}, self.options());
   max_unpooling2d_forward_out_cpu(output, self, indices, output_size);
   return output;
@@ -158,14 +157,14 @@ Tensor max_unpooling3d_forward_out_cpu_frame(
   int64_t iH = input.size(dimh);
   int64_t iW = input.size(dimw);
 
-  scalar_t* input_data = input.data<scalar_t>();
-  scalar_t* output_data = output.data<scalar_t>();
-  int64_t* indices_data = indices.data<int64_t>();
+  scalar_t* input_data = input.data_ptr<scalar_t>();
+  scalar_t* output_data = output.data_ptr<scalar_t>();
+  int64_t* indices_data = indices.data_ptr<int64_t>();
 
   for (int64_t p = 0; p < nBatch; p++) {
     int64_t inputOffset = p * nSlices * iT * iW * iH;
     int64_t outputOffset = p * nSlices * oT * oW * oH;
-    int64_t k;
+    int64_t k = 0;
     bool has_error = false;
     int error_index = 0;
 #pragma omp parallel for private(k)
@@ -214,35 +213,35 @@ static void max_unpooling3d_shape_check(
     const Tensor& input,
     const Tensor& gradOutput,
     const Tensor& indices,
-    IntList output_size,
-    IntList stride,
-    IntList padding) {
+    IntArrayRef output_size,
+    IntArrayRef stride,
+    IntArrayRef padding) {
   int64_t oT = output_size[0];
   int64_t oH = output_size[1];
   int64_t oW = output_size[2];
-  AT_CHECK(
+  TORCH_CHECK(
       indices.scalar_type() == at::ScalarType::Long,
       "elements in indices should be type int64");
-  AT_CHECK(
+  TORCH_CHECK(
       (input.ndimension() == 4 || input.ndimension() == 5),
       "Input to max_unpooling3d should be a 4d or 5d Tensor",
       input.sizes());
-  AT_CHECK(
+  TORCH_CHECK(
       output_size.size() == 3,
       "There should be exactly three elements (depth, height, width) in output_size");
-  AT_CHECK(
+  TORCH_CHECK(
       stride.size() == 3,
       "There should be exactly three elements (depth, height, width) in stride");
-  AT_CHECK(
+  TORCH_CHECK(
       padding.size() == 3,
       "There should be exactly three elements (depth, height, width) in padding");
-  AT_CHECK(
+  TORCH_CHECK(
       input.sizes() == indices.sizes(),
       "Shape of indices should match shape of input");
 
-  AT_CHECK(input.numel() > 0, "Input must be non-empty");
+  TORCH_CHECK(input.numel() > 0, "Input must be non-empty");
 
-  AT_CHECK(
+  TORCH_CHECK(
       stride[0] > 0 && stride[1] > 0 && stride[2] > 0,
       "strides should be greater than zero, but got stride: ",
       stride);
@@ -278,7 +277,7 @@ static void max_unpooling3d_shape_check(
           "x",
           gradOutput.size(dimw));
     }
-    AT_CHECK(
+    TORCH_CHECK(
         gradOutput.ndimension() == input.ndimension() &&
             gradOutput.size(dimn) == nslices,
         "gradOutput and input Tensors should have same number of dimensions and also the same number of channels/slices");
@@ -289,10 +288,10 @@ Tensor& max_unpooling3d_forward_out_cpu(
     Tensor& output,
     const Tensor& self_,
     const Tensor& indices_,
-    IntList output_size,
-    IntList stride,
-    IntList padding) {
-  AT_CHECK(output.is_contiguous(), "output must be contiguous");
+    IntArrayRef output_size,
+    IntArrayRef stride,
+    IntArrayRef padding) {
+  TORCH_CHECK(output.is_contiguous(), "output must be contiguous");
   int64_t oT = output_size[0];
   int64_t oH = output_size[1];
   int64_t oW = output_size[2];
@@ -311,7 +310,7 @@ Tensor& max_unpooling3d_forward_out_cpu(
   output.zero_();
 
   AT_DISPATCH_FLOATING_TYPES(
-      self.type(), "max_unpooling3d_forward_out_cpu_frame", ([&] {
+      self.scalar_type(), "max_unpooling3d_forward_out_cpu_frame", ([&] {
         max_unpooling3d_forward_out_cpu_frame<scalar_t>(
             output,
             self,
@@ -332,9 +331,9 @@ Tensor& max_unpooling3d_forward_out_cpu(
 Tensor max_unpooling3d_forward_cpu(
     const Tensor& self,
     const Tensor& indices,
-    IntList output_size,
-    IntList stride,
-    IntList padding) {
+    IntArrayRef output_size,
+    IntArrayRef stride,
+    IntArrayRef padding) {
   auto output = at::empty({0}, self.options());
   max_unpooling3d_forward_out_cpu(
       output, self, indices, output_size, stride, padding);
@@ -353,7 +352,7 @@ static void max_unpooling2d_backward_out_cpu_frame(
     int64_t owidth) {
   bool has_error = false;
   int64_t error_index = 0;
-  int k;
+  int k = 0;
 #pragma omp parallel for private(k)
   for (k = 0; k < nslices; k++) {
     scalar_t* gradInput_p_k = gradInput_p + k * iwidth * iheight;
@@ -394,8 +393,8 @@ Tensor& max_unpooling2d_backward_out_cpu(
     const Tensor& grad_output_,
     const Tensor& self,
     const Tensor& indices_,
-    IntList output_size) {
-  AT_CHECK(grad_input.is_contiguous(), "grad_input must be contiguous");
+    IntArrayRef output_size) {
+  TORCH_CHECK(grad_input.is_contiguous(), "grad_input must be contiguous");
   int64_t oheight = output_size[0];
   int64_t owidth = output_size[1];
   int dimw = 2;
@@ -404,13 +403,13 @@ Tensor& max_unpooling2d_backward_out_cpu(
   int nslices;
   int iheight;
   int iwidth;
-  AT_CHECK(
+  TORCH_CHECK(
       indices_.scalar_type() == at::ScalarType::Long,
       "elements in indices should be type int64");
-  AT_CHECK(
+  TORCH_CHECK(
       self.sizes() == indices_.sizes(), "Input shape must match indices shape");
 
-  AT_CHECK(output_size.size() == 2, "Output size must be 2");
+  TORCH_CHECK(output_size.size() == 2, "Output size must be 2");
 
   /* get contiguous gradOutput and indices */
   auto grad_output = grad_output_.contiguous();
@@ -443,15 +442,15 @@ Tensor& max_unpooling2d_backward_out_cpu(
         grad_output.size(dimw));
   }
   AT_DISPATCH_FLOATING_TYPES(
-      self.type(), "max_unpooling2d_backward_out_cpu_frame", ([&] {
+      self.scalar_type(), "max_unpooling2d_backward_out_cpu_frame", ([&] {
         int p;
         for (p = 0; p < nbatch; p++) {
           auto inputOffset = p * nslices * iheight * iwidth;
           auto outputOffset = p * nslices * oheight * owidth;
           max_unpooling2d_backward_out_cpu_frame<scalar_t>(
-              grad_input.data<scalar_t>() + inputOffset,
-              grad_output.data<scalar_t>() + outputOffset,
-              indices.data<int64_t>() + inputOffset,
+              grad_input.data_ptr<scalar_t>() + inputOffset,
+              grad_output.data_ptr<scalar_t>() + outputOffset,
+              indices.data_ptr<int64_t>() + inputOffset,
               nslices,
               iheight,
               iwidth,
@@ -466,8 +465,8 @@ Tensor max_unpooling2d_backward_cpu(
     const Tensor& grad_output,
     const Tensor& self,
     const Tensor& indices,
-    IntList output_size) {
-  auto grad_input = at::empty_like(self);
+    IntArrayRef output_size) {
+  auto grad_input = at::empty_like(self, LEGACY_CONTIGUOUS_MEMORY_FORMAT);
   max_unpooling2d_backward_out_cpu(
       grad_input, grad_output, self, indices, output_size);
   return grad_input;
@@ -485,7 +484,7 @@ static void max_unpooling3d_backward_out_cpu_frame(
     int64_t oT,
     int64_t oH,
     int64_t oW) {
-  int k;
+  int k = 0;
   bool has_error = false;
   int error_index = 0;
 #pragma omp parallel for private(k)
@@ -531,10 +530,10 @@ Tensor& max_unpooling3d_backward_out_cpu(
     const Tensor& grad_output_,
     const Tensor& self,
     const Tensor& indices_,
-    IntList output_size,
-    IntList stride,
-    IntList padding) {
-  AT_CHECK(grad_input.is_contiguous(), "grad_input must be contiguous");
+    IntArrayRef output_size,
+    IntArrayRef stride,
+    IntArrayRef padding) {
+  TORCH_CHECK(grad_input.is_contiguous(), "grad_input must be contiguous");
   auto oT = output_size[0];
   auto oH = output_size[1];
   auto oW = output_size[2];
@@ -573,15 +572,15 @@ Tensor& max_unpooling3d_backward_out_cpu(
 
   /* backprop */
   AT_DISPATCH_FLOATING_TYPES(
-      self.type(), "max_unpooling3d_backward_out_cpu_frame", ([&] {
+      self.scalar_type(), "max_unpooling3d_backward_out_cpu_frame", ([&] {
         int p;
         for (p = 0; p < nbatch; p++) {
           int inputOffset = p * nslices * iT * iH * iW;
           int outputOffset = p * nslices * oT * oH * oW;
           max_unpooling3d_backward_out_cpu_frame<scalar_t>(
-              grad_input.data<scalar_t>() + inputOffset,
-              grad_output.data<scalar_t>() + outputOffset,
-              indices.data<int64_t>() + inputOffset,
+              grad_input.data_ptr<scalar_t>() + inputOffset,
+              grad_output.data_ptr<scalar_t>() + outputOffset,
+              indices.data_ptr<int64_t>() + inputOffset,
               nslices,
               iT,
               iH,
@@ -598,10 +597,10 @@ Tensor max_unpooling3d_backward_cpu(
     const Tensor& grad_output,
     const Tensor& self,
     const Tensor& indices,
-    IntList output_size,
-    IntList stride,
-    IntList padding) {
-  auto grad_input = at::empty_like(self);
+    IntArrayRef output_size,
+    IntArrayRef stride,
+    IntArrayRef padding) {
+  auto grad_input = at::empty_like(self, LEGACY_CONTIGUOUS_MEMORY_FORMAT);
   max_unpooling3d_backward_out_cpu(
       grad_input, grad_output, self, indices, output_size, stride, padding);
   return grad_input;

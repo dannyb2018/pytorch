@@ -1,13 +1,16 @@
 #pragma once
 
+#include <c10/macros/Macros.h>
+#include <c10/util/Registry.h>
+#include "caffe2/core/operator.h"
+
 // TODO Also register c10 operators on mobile
-#if !defined(CAFFE2_IS_XPLAT_BUILD)
+#if !defined(CAFFE2_IS_XPLAT_BUILD) && !defined(C10_MOBILE)
 #include <ATen/core/dispatch/Dispatcher.h>
 #include <ATen/core/ivalue.h>
 #include <c10/util/ArrayRef.h>
 #include <c10/util/C++17.h>
 #include <c10/util/Metaprogramming.h>
-#include "caffe2/core/operator.h"
 #include "caffe2/core/export_caffe2_op_to_c10.h"
 
 namespace caffe2 {
@@ -36,7 +39,6 @@ class C10OperatorWrapper final : public Operator<Context> {
       Workspace* ws)
       : Operator<Context>(operator_def, ws),
         op_(op),
-        kernel_(at::nullopt),
         has_preallocated_outputs_(
             op_.schema().arguments().size() != 0 &&
             op_.schema().arguments().back().name() ==
@@ -109,7 +111,7 @@ class C10OperatorWrapper final : public Operator<Context> {
         AT_ASSERTM(
             input_tensor_index == 0,
             "Error in caffe2->c10 wrapper: Schema can only have either one or more Tensor inputs or one TensorList input.");
-        stack_.emplace_back(ivalue::TensorList::create(array_inputs_()));
+        stack_.emplace_back(array_inputs_());
         input_tensor_index = InputSize();
 
       } else {
@@ -127,11 +129,7 @@ class C10OperatorWrapper final : public Operator<Context> {
 
   void callKernel_() {
     AT_ASSERT(stack_.size() == op_.schema().arguments().size());
-    if (!kernel_.has_value()) {
-      // TODO if kernel is already set, try re-dispatch to assert it goes to the same kernel
-      kernel_ = c10::Dispatcher::singleton().lookup(op_, &stack_);
-    }
-    kernel_->call(&stack_);
+    c10::Dispatcher::singleton().callBoxed(op_, &stack_);
   }
 
   void popOutputs_() {
@@ -142,8 +140,8 @@ class C10OperatorWrapper final : public Operator<Context> {
     stack_.clear();
   }
 
-  std::vector<at::Tensor> array_inputs_() {
-    std::vector<at::Tensor> result;
+  c10::List<at::Tensor> array_inputs_() {
+    c10::List<at::Tensor> result;
     result.reserve(InputSize());
     for (size_t i = 0; i < InputSize(); ++i) {
       result.emplace_back(Input(i));
@@ -151,8 +149,8 @@ class C10OperatorWrapper final : public Operator<Context> {
     return result;
   }
 
-  std::vector<at::Tensor> preallocated_outputs_() {
-    std::vector<at::Tensor> result;
+  c10::List<at::Tensor> preallocated_outputs_() {
+    c10::List<at::Tensor> result;
     result.reserve(OutputSize());
     for (size_t i = 0; i < OutputSize(); ++i) {
       result.emplace_back(OperatorBase::OutputTensorOrUndefined(i));
@@ -196,7 +194,6 @@ class C10OperatorWrapper final : public Operator<Context> {
   }
 
   c10::OperatorHandle op_;
-  c10::optional<OpKernel> kernel_;
 
   // has_preallocated_outputs_ is true iff the operator schema has a last
   // argument that is a TensorList and has a name equal to with the name equal
@@ -214,18 +211,18 @@ class C10OperatorWrapper final : public Operator<Context> {
 template <class Context>
 inline std::function<
     std::unique_ptr<OperatorBase>(const OperatorDef&, Workspace*)>
-createC10OperatorWrapper(const char* op_name, const char* overload_name) {
-  return [op_name, overload_name](const OperatorDef& op_def, Workspace* ws) {
+createC10OperatorWrapper(const c10::OperatorName& op_name) {
+  return [op_name](const OperatorDef& op_def, Workspace* ws) {
     auto op_handle =
-        c10::Dispatcher::singleton().findSchema(op_name, overload_name);
+        c10::Dispatcher::singleton().findSchema(op_name);
     AT_ASSERTM(
         op_handle.has_value(),
         "Tried to register c10 operator ",
-        op_name,
+        op_name.name,
         ".",
-        overload_name,
+        op_name.overload_name,
         " with caffe2, but didn't find the c10 operator.");
-    return c10::guts::make_unique<C10OperatorWrapper<Context>>(
+    return std::make_unique<C10OperatorWrapper<Context>>(
         *op_handle, op_def, ws);
   };
 }
@@ -233,26 +230,24 @@ createC10OperatorWrapper(const char* op_name, const char* overload_name) {
 } // namespace detail
 } // namespace caffe2
 
-// TODO Currently we only register the CPU variant. This is going to be fixed
-//      once the tensor detemplatization lands.
 #define C10_EXPORT_C10_OP_TO_CAFFE2_CPU(                       \
     OperatorName, Name)                                        \
   REGISTER_CPU_OPERATOR_CREATOR(                               \
       Name,                                                    \
       ::caffe2::detail::createC10OperatorWrapper<CPUContext>(  \
-          OperatorName, ""))
+          {OperatorName, ""}))
 #define C10_EXPORT_C10_OP_TO_CAFFE2_CUDA(                      \
     OperatorName, Name)                                        \
   REGISTER_CUDA_OPERATOR_CREATOR(                              \
       Name,                                                    \
       ::caffe2::detail::createC10OperatorWrapper<CUDAContext>( \
-          OperatorName, ""))
+          {OperatorName, ""}))
 #define C10_EXPORT_C10_OP_TO_CAFFE2_HIP(                       \
     OperatorName, Name)                                        \
   REGISTER_HIP_OPERATOR_CREATOR(                               \
       Name,                                                    \
       ::caffe2::detail::createC10OperatorWrapper<HIPContext>(  \
-          OperatorName, ""))
+          {OperatorName, ""}))
 #else
 #define C10_EXPORT_C10_OP_TO_CAFFE2_CPU(                       \
     OperatorName, Name)
