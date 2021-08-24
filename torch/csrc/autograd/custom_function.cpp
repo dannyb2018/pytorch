@@ -1,5 +1,7 @@
+#include <c10/util/irange.h>
 #include <torch/csrc/autograd/custom_function.h>
 #include <torch/csrc/autograd/functions/accumulate_grad.h>
+#include <torch/csrc/autograd/autograd.h>
 
 namespace torch { namespace autograd {
 
@@ -8,25 +10,29 @@ VariableInfo::VariableInfo(const Variable& var)
   , device(var.device())
   , scalar_type(var.scalar_type())
   , size(var.sizes().vec())
-  , requires_grad(var.requires_grad()) {
+  , requires_grad(var.requires_grad())
+  , is_empty(false) {
 }
+
+VariableInfo::VariableInfo() : requires_grad(false), is_empty(true) {}
 
 Variable VariableInfo::zeros(at::OptionalDeviceGuard& device_guard) const {
-  return at::zeros(size,
-    at::TensorOptions(scalar_type).device(device).layout(layout));
+  if (is_empty) {
+    // Return undefined tensor.
+    return at::Tensor();
+  } else {
+    return at::zeros(
+        size, at::TensorOptions(scalar_type).device(device).layout(layout));
+  }
 }
 
-variable_list _wrap_outputs(const variable_list &input_vars,
+optional_variable_list _process_backward_mode_ad(
+  const std::unordered_set<at::TensorImpl*> &inputs_set,
   const std::unordered_set<at::TensorImpl*> &non_differentiable,
   const std::unordered_set<at::TensorImpl*> &dirty_inputs,
-  const at::ArrayRef<Variable> raw_outputs,
+  const at::ArrayRef<c10::optional<Variable>> raw_outputs,
   const std::shared_ptr<Node> &cdata) {
 
-  std::unordered_set<at::TensorImpl*> inputs;
-  inputs.reserve(input_vars.size());
-  for (auto& var : input_vars) {
-    inputs.emplace(var.unsafeGetTensorImpl());
-  }
 
   int num_outputs = raw_outputs.size();
 
@@ -53,7 +59,7 @@ variable_list _wrap_outputs(const variable_list &input_vars,
       // Here, `y` requires_grad (!).
     } else if (is_modified) {
       if (var.is_leaf() && var.requires_grad()) {
-        throw std::runtime_error("a leaf Variable that requires grad has been used in an in-place operation.");
+        TORCH_CHECK(false, "a leaf Variable that requires grad has been used in an in-place operation.");
       }
       // No need to mark as modified Tensors that are not inputs.
       if (!is_input) {
@@ -72,7 +78,7 @@ variable_list _wrap_outputs(const variable_list &input_vars,
 
       // If the input was modified, transplant the grad_fn in the graph:
       // grad_fn <- variable <- self  ==>  grad_fn <- self <- variable
-      var.grad().reset();
+      var.mutable_grad().reset();
       impl::clear_hooks(var);
       if (auto grad_acc_fn = impl::try_get_grad_accumulator(var)) {
         auto grad_acc = dynamic_cast<AccumulateGrad*>(grad_acc_fn.get());
@@ -95,19 +101,30 @@ variable_list _wrap_outputs(const variable_list &input_vars,
     }
   };
 
-  std::vector<torch::autograd::Variable> outputs;
+  optional_variable_list outputs;
   std::unordered_set<at::TensorImpl*> outputs_impl; // For dirty_inputs check
   outputs.reserve(num_outputs);
   int num_diff_outputs = 0;
 
 
-  for (auto i = 0; i < num_outputs; ++i) {
-    auto out_tensor_impl = raw_outputs[i].unsafeGetTensorImpl();
-    bool is_input = inputs.count(out_tensor_impl) > 0;
-    bool is_modified = dirty_inputs.count(out_tensor_impl) > 0;
-    bool is_differentiable = cdata && non_differentiable.count(out_tensor_impl) == 0;
+  for (const auto i : c10::irange(num_outputs)) {
+    // For outputs that are not tensors, put a placeholder undefined input.
+    if (!raw_outputs[i].has_value()) {
+      if (cdata) {
+        auto output_nr = cdata->add_input_metadata(Node::undefined_input());
+        AT_ASSERT(i == (int)output_nr);
+      }
+      outputs.emplace_back();
+      continue;
+    }
 
-    Variable var = raw_outputs[i];
+    Variable var = raw_outputs[i].value();
+
+    auto out_tensor_impl = var.unsafeGetTensorImpl();
+    bool is_input = inputs_set.count(out_tensor_impl) > 0;
+    bool is_modified = dirty_inputs.count(out_tensor_impl) > 0;
+    bool is_differentiable = cdata && non_differentiable.count(out_tensor_impl) == 0
+                              && isDifferentiableType(var.scalar_type());
 
     if (cdata) {
       auto output_nr = cdata->add_input_metadata(var);
@@ -120,9 +137,9 @@ variable_list _wrap_outputs(const variable_list &input_vars,
     // return and input that is a view as is).
     // See NOTE [ View + Inplace detection ] for why we replace everything by a warning.
     if (!(is_input && is_modified) && var.is_view()) {
-      // NB: is_view() ==> get_autograd_meta()
-      auto diff_view_meta = static_cast<DifferentiableViewMeta*>(impl::get_autograd_meta(var));
-      diff_view_meta->creation_meta = CreationMeta::IN_CUSTOM_FUNCTION;
+      // is_view() => diff_view_meta
+      auto diff_view_meta = impl::get_view_autograd_meta(var);
+      diff_view_meta->set_creation_meta(CreationMeta::IN_CUSTOM_FUNCTION);
     }
 
     if (is_differentiable) {
@@ -137,10 +154,11 @@ variable_list _wrap_outputs(const variable_list &input_vars,
   // See NOTE [ View + Inplace detection ] for more details
   if (num_diff_outputs > 1) {
     for (auto& var: outputs) {
-      if (var.is_view()) {
-        // NB: is_view() ==> get_autograd_meta()
-        auto diff_view_meta = static_cast<DifferentiableViewMeta*>(impl::get_autograd_meta(var));
-        diff_view_meta->creation_meta = CreationMeta::MULTI_OUTPUT_NODE;
+      if (var.has_value()) {
+        auto diff_view_meta = impl::get_view_autograd_meta(var.value());
+        if (diff_view_meta && diff_view_meta->has_bw_view()) {
+          diff_view_meta->set_creation_meta(CreationMeta::MULTI_OUTPUT_NODE);
+        }
       }
     }
   }
@@ -151,6 +169,26 @@ variable_list _wrap_outputs(const variable_list &input_vars,
                 "Some elements marked as dirty during the forward method were not returned as output. The"
                 " inputs that are modified inplace must all be outputs of the Function.");
   }
+
+  return outputs;
+}
+
+
+
+optional_variable_list _wrap_outputs(const variable_list &input_vars,
+  const std::unordered_set<at::TensorImpl*> &non_differentiable,
+  const std::unordered_set<at::TensorImpl*> &dirty_inputs,
+  const at::ArrayRef<c10::optional<Variable>> raw_outputs,
+  const std::shared_ptr<Node> &cdata) {
+
+  std::unordered_set<at::TensorImpl*> inputs_set;
+  inputs_set.reserve(input_vars.size());
+  for (auto& var : input_vars) {
+    inputs_set.emplace(var.unsafeGetTensorImpl());
+  }
+
+  auto outputs = _process_backward_mode_ad(inputs_set, non_differentiable, dirty_inputs, raw_outputs, cdata);
+
 
   return outputs;
 }
@@ -230,6 +268,10 @@ void AutogradContext::mark_non_differentiable(const variable_list &outputs) {
   for(auto& var : outputs) {
     non_differentiable_.insert(var.unsafeGetTensorImpl());
   }
+}
+
+void AutogradContext::set_materialize_grads(bool value) {
+  materialize_grads_ = value;
 }
 
 const std::unordered_set<at::TensorImpl*>& AutogradContext::get_and_bump_dirty() const {

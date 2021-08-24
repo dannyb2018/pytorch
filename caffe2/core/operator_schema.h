@@ -37,11 +37,10 @@ constexpr int kCannotComputeNumOutputs = -1;
  *     OPERATOR_SCHEMA(name)
  *         .NumInputs(2).NumOutputs(1).AllowInplace({{0, 0}});
  */
-class CAFFE2_API OpSchema {
+class TORCH_API OpSchema {
  public:
-  OpSchema() : type_("unknown"), file_("unknown"), line_(0) {}
-  OpSchema(const string& type, const string& file, const int line)
-      : type_(type), file_(file), line_(line) {}
+  OpSchema() : OpSchema("unknown", "unknown", 0) {}
+  OpSchema(const string& type, const string& file, const int line);
 
   /**
    * @brief Returns the file that the op schema is registered from.
@@ -340,7 +339,7 @@ class CAFFE2_API OpSchema {
     return inplace_enforced_(x, y);
   }
 
-  CAFFE2_API friend std::ostream& operator<<(std::ostream& out, const OpSchema& schema);
+  TORCH_API friend std::ostream& operator<<(std::ostream& out, const OpSchema& schema);
 
   const std::vector<Argument>& args() const {
     return args_;
@@ -443,25 +442,9 @@ class CAFFE2_API OpSchema {
   std::function<bool(int, int)> inplace_enforced_ = [](int, int) {
     return false;
   };
-  TensorInferenceFunctionType tensor_inference_function_ =
-      [](const OperatorDef& def, const vector<TensorShape>&) {
-        vector<TensorShape> out;
-        for (int i = 0; i < def.output_size(); i++) {
-          TensorShape ts;
-          ts.set_unknown_shape(true);
-          out.push_back(ts);
-        }
-        return out;
-      };
+  TensorInferenceFunctionType tensor_inference_function_;
   std::unique_ptr<CostInferenceFunctionType> cost_inference_function_ = nullptr;
-  DeviceInferenceFunctionType device_inference_function_ =
-      [](const OperatorDef& def) {
-        auto op_device =
-            def.has_device_option() ? def.device_option() : DeviceOption();
-        vector<DeviceOption> in_dev(def.input_size(), op_device);
-        vector<DeviceOption> out_dev(def.output_size(), op_device);
-        return std::make_pair(in_dev, out_dev);
-      };
+  DeviceInferenceFunctionType device_inference_function_;
 
   std::function<std::vector<TensorFiller>(
       const std::vector<std::vector<int64_t>>&)>
@@ -474,24 +457,10 @@ class CAFFE2_API OpSchema {
 /**
  * @brief A registry to hold all the operator schemas.
  */
-class CAFFE2_API OpSchemaRegistry {
+class TORCH_API OpSchemaRegistry {
  public:
   static OpSchema&
-  NewSchema(const string& key, const string& file, const int line) {
-    auto& m = map();
-    auto it = m.find(key);
-    if (it != m.end()) {
-      const auto& schema = it->second;
-      std::ios_base::Init init;
-      std::cerr << "Trying to register schema with name " << key
-                << " from file " << file << " line " << line
-                << ", but it is already registered from file " << schema.file()
-                << " line " << schema.line();
-      abort();
-    }
-    m.emplace(std::make_pair(key, OpSchema(key, file, line)));
-    return m[key];
-  }
+  NewSchema(const string& key, const string& file, const int line);
 
   static const OpSchema* Schema(const string& key) {
     auto& m = map();
@@ -600,27 +569,33 @@ OpSchema::Cost PointwiseCostInference(
 
 } // namespace caffe2
 
+#if defined(_MSC_VER)
+#define EXPORT_IF_NOT_MSVC
+#else
+#define EXPORT_IF_NOT_MSVC C10_EXPORT
+#endif
+
 #ifndef CAFFE2_NO_OPERATOR_SCHEMA
 
-#define OPERATOR_SCHEMA(name)                                       \
-  C10_EXPORT void CAFFE2_PLEASE_ADD_OPERATOR_SCHEMA_FOR_##name(){}; \
-  static OpSchema* C10_ANONYMOUS_VARIABLE(name) CAFFE2_UNUSED =     \
+#define OPERATOR_SCHEMA(name)                                               \
+  EXPORT_IF_NOT_MSVC void CAFFE2_PLEASE_ADD_OPERATOR_SCHEMA_FOR_##name(){}; \
+  static OpSchema* C10_ANONYMOUS_VARIABLE(name) CAFFE2_UNUSED =             \
       &OpSchemaRegistry::NewSchema(#name, __FILE__, __LINE__)
 
 #else // CAFFE2_NO_OPERATOR_SCHEMA
 
-#define OPERATOR_SCHEMA(name)                                       \
-  C10_EXPORT void CAFFE2_PLEASE_ADD_OPERATOR_SCHEMA_FOR_##name(){}; \
-  static OpSchema* C10_ANONYMOUS_VARIABLE(name) CAFFE2_UNUSED =     \
+#define OPERATOR_SCHEMA(name)                                               \
+  EXPORT_IF_NOT_MSVC void CAFFE2_PLEASE_ADD_OPERATOR_SCHEMA_FOR_##name(){}; \
+  static OpSchema* C10_ANONYMOUS_VARIABLE(name) CAFFE2_UNUSED =             \
       1 ? nullptr : &OpSchemaRegistry::NewSchema(#name, __FILE__, __LINE__)
 
 #endif // CAFFE2_NO_OPERATOR_SCHEMA
 
 #ifdef CAFFE2_NO_GRADIENT_OPS
 
-#define GRADIENT_OPERATOR_SCHEMA(name)                              \
-  C10_EXPORT void CAFFE2_PLEASE_ADD_OPERATOR_SCHEMA_FOR_##name(){}; \
-  static OpSchema* C10_ANONYMOUS_VARIABLE(name) CAFFE2_UNUSED =     \
+#define GRADIENT_OPERATOR_SCHEMA(name)                                      \
+  EXPORT_IF_NOT_MSVC void CAFFE2_PLEASE_ADD_OPERATOR_SCHEMA_FOR_##name(){}; \
+  static OpSchema* C10_ANONYMOUS_VARIABLE(name) CAFFE2_UNUSED =             \
       1 ? nullptr : &OpSchemaRegistry::NewSchema(#name, __FILE__, __LINE__)
 
 #else

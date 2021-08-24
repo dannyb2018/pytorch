@@ -1,4 +1,5 @@
 #include <torch/csrc/distributed/autograd/context/container.h>
+
 #include <c10/util/Exception.h>
 #include <torch/csrc/distributed/autograd/rpc_messages/cleanup_autograd_context_req.h>
 
@@ -41,8 +42,16 @@ DistAutogradContainer& DistAutogradContainer::init(int64_t worker_id) {
 
   auto& container = getInstanceInternal();
   TORCH_CHECK(
-      !container.initialized_,
-      "Container is already initialized! Cannot initialize it twice!");
+      !container.initialized_ || (worker_id == container.worker_id_),
+      "Container is already initialized with worker_id: ",
+      container.worker_id_,
+      ", cannot initialize with different worker_id: ",
+      worker_id);
+
+  if (container.initialized_) {
+    LOG(INFO) << "DistAutogradContainer is already initialized";
+    return container;
+  }
 
   container.worker_id_ = worker_id;
   container.next_context_id_ = static_cast<int64_t>(worker_id)
@@ -68,7 +77,7 @@ uint32_t DistAutogradContainer::computeNumShards() {
       num_shards <<= 1;
     }
   }
-  LOG(INFO) << "Number of shards for DistAutogradContainer: " << num_shards;
+  VLOG(1) << "Number of shards for DistAutogradContainer: " << num_shards;
   return num_shards;
 }
 
@@ -237,16 +246,18 @@ void DistAutogradContainer::sendReleaseContextRpc(
           CleanupAutogradContextReq(context_id).toMessage(),
           options);
 
-      cleanupFuture->addCallback([](const rpc::FutureMessage& cleanupFuture) {
-        if (cleanupFuture.hasError()) {
-          std::string errorMsg = c10::str(
-              "Could not release Dist Autograd Context after ",
-              kNumCleanupContextRetries,
-              " attempts.");
-          LOG(ERROR) << errorMsg;
-          return;
-        }
-      });
+      cleanupFuture->addCallback(
+          [worker_id](rpc::JitFuture& future) {
+            if (future.hasError()) {
+              std::string errorMsg = c10::str(
+                  "Could not release Dist Autograd Context on node ",
+                  worker_id,
+                  ": ",
+                  future.tryRetrieveErrorMessage());
+              LOG(ERROR) << errorMsg;
+              return;
+            }
+          });
     } catch (const std::exception& e) {
       LOG(INFO)
           << "Failed to send RPC to clear Dist Autograd context to worker id: "

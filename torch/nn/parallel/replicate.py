@@ -1,5 +1,7 @@
-import torch.cuda.comm as comm
-from torch.cuda._utils import _get_device_index
+from . import comm
+from torch._utils import _get_device_index
+
+from collections import OrderedDict
 
 
 def _is_script_module(module):
@@ -19,7 +21,7 @@ def _init_script_module():
 
 def _is_jit_enabled():
     import torch.jit
-    return torch.jit._enabled
+    return torch.jit._state._enabled
 
 
 # Check if we can safely replicate the module.
@@ -42,7 +44,7 @@ def _replicatable_module(module, memo=None):
     if memo is None:
         memo = set()
 
-    # memorize visited modules
+    # memoize visited modules
     memo.add(module)
     if _is_script_module(module):
         memo.update(descendant_modules(module))
@@ -78,7 +80,10 @@ def replicate(network, devices, detach=False):
         raise RuntimeError("Cannot replicate network where python modules are "
                            "childrens of ScriptModule")
 
-    devices = list(map(lambda x: _get_device_index(x, True), devices))
+    if not devices:
+        return []
+
+    devices = [_get_device_index(x, True) for x in devices]
     num_replicas = len(devices)
 
     params = list(network.parameters())
@@ -103,12 +108,19 @@ def replicate(network, devices, detach=False):
     modules = list(network.modules())
     module_copies = [[] for device in devices]
     module_indices = {}
-    scriptmodule_skip_attr = {"_parameters", "_buffers", "_modules", "forward", "_c"}
 
     for i, module in enumerate(modules):
         module_indices[module] = i
         for j in range(num_replicas):
-            module_copies[j].append(module._replicate_for_data_parallel())
+            replica = module._replicate_for_data_parallel()
+            # This is a temporary fix for DDP. DDP needs to access the
+            # replicated model parameters. It used to do so through
+            # `mode.parameters()`. The fix added in #33907 for DP stops the
+            # `parameters()` API from exposing the replicated parameters.
+            # Hence, we add a `_former_parameters` dict here to support DDP.
+            replica._former_parameters = OrderedDict()
+
+            module_copies[j].append(replica)
 
     for i, module in enumerate(modules):
         for key, child in module._modules.items():
@@ -134,6 +146,8 @@ def replicate(network, devices, detach=False):
                     # parameters in replicas are no longer leaves,
                     # so setattr them as non-parameter attributes
                     setattr(replica, key, param)
+                    # expose the parameter for DDP
+                    replica._former_parameters[key] = param
         for key, buf in module._buffers.items():
             if buf is None:
                 for j in range(num_replicas):

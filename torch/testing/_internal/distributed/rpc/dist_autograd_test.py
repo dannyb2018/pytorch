@@ -1,9 +1,10 @@
 import sys
 import threading
 import time
-import unittest
 from enum import Enum
+import random
 import torch
+import torch.nn as nn
 from datetime import timedelta
 import torch.distributed as dist
 import torch.distributed.autograd as dist_autograd
@@ -11,11 +12,10 @@ import torch.distributed.rpc as rpc
 import torch.testing._internal.dist_utils
 from torch.autograd import Function
 from torch.autograd.function import once_differentiable
-from torch.testing._internal.common_utils import IS_MACOS
-import torch.testing._internal.dist_utils as dist_utils
+from torch.distributed.rpc import RRef
+from torch.testing._internal.common_utils import IS_MACOS, sandcastle_skip_if
 from torch.testing._internal.dist_utils import (
     dist_init,
-    get_shutdown_error_regex,
     initialize_pg,
     wait_until_node_failure,
     worker_name,
@@ -23,9 +23,7 @@ from torch.testing._internal.dist_utils import (
 from torch.testing._internal.distributed.rpc.rpc_agent_test_fixture import (
     RpcAgentTestFixture,
 )
-from torch.testing._internal.distributed.rpc.faulty_rpc_agent_test_fixture import (
-    FaultyRpcAgentTestFixture,
-)
+from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 
 
 # Right now we test up to 3-layer nested rpc calls.
@@ -74,8 +72,7 @@ def create_tensor():
 
 
 @torch.jit.script
-def create_torchscript_tensor():
-    # type: () -> Tensor
+def create_torchscript_tensor() -> torch.Tensor:
     return torch.ones((3, 3)).requires_grad_()
 
 
@@ -98,8 +95,7 @@ def my_script_add(t1, t2):
 
 
 @torch.jit.script
-def my_script_ref_add(ref_t1, t2):
-    # type: (RRef[Tensor], Tensor) -> Tensor
+def my_script_ref_add(ref_t1: RRef[torch.Tensor], t2: torch.Tensor) -> torch.Tensor:
     t1 = ref_t1.to_here()
     return torch.add(t1, t2)
 
@@ -189,10 +185,8 @@ class ExecMode(Enum):
     RPC_ASYNC = 4  # Run the operation using rpc_async
 
 
-@unittest.skipIf(
-    not torch._six.PY3, "Pytorch distributed autograd package does not support python2"
-)
-class DistAutogradTest(RpcAgentTestFixture):
+# Common utils for both CPU and CUDA test suites
+class CommonDistAutogradTest(RpcAgentTestFixture):
     def _exec_func_with_dst(self, dst, exec_mode, method, *args):
         if ExecMode.LOCAL == exec_mode:
             if len(args) == 1 and isinstance(args[0], list):
@@ -225,6 +219,32 @@ class DistAutogradTest(RpcAgentTestFixture):
     def _check_rpc_done(self, rank_distance):
         _check_rpc_done(rank_distance)
 
+    def _verify_backwards(self, exec_mode, tensors, context_id, local_grads, *args):
+        if exec_mode == ExecMode.LOCAL:
+            torch.autograd.backward(tensors)
+            return [arg.grad for arg in args]
+        else:
+            self._verify_backwards_remote(tensors, context_id, local_grads, *args)
+
+    def _verify_backwards_remote(self, tensors, context_id, local_grads, *args):
+        dist_autograd.backward(context_id, tensors)
+
+        # Verify grads were accumulated appropriately.
+        grads = dist_autograd.get_gradients(context_id)
+        nargs = len(args)
+        ngrads = 0
+        for i in range(0, nargs):
+            if local_grads[i] is not None:
+                self.assertIn(args[i], grads)
+                self.assertEqual(local_grads[i], grads[args[i]])
+                ngrads += 1
+            else:
+                self.assertNotIn(args[i], grads)
+
+        self.assertEqual(ngrads, len(grads))
+
+
+class DistAutogradTest(CommonDistAutogradTest):
     @dist_init
     def test_autograd_context(self):
         # Verify max possible id.
@@ -362,7 +382,7 @@ class DistAutogradTest(RpcAgentTestFixture):
     def _test_graph(self, fn, exec_mode):
         dst_rank = (self.rank + 1) % self.world_size
 
-        initialize_pg(self.init_method, self.rank, self.world_size)
+        initialize_pg(self.file_init_method, self.rank, self.world_size)
 
         with dist_autograd.context() as context_id:
             t1 = torch.ones(3, 3, requires_grad=True)
@@ -434,7 +454,7 @@ class DistAutogradTest(RpcAgentTestFixture):
     def _test_graph_for_py_nested_call(self, exec_mode):
         dst_rank = (self.rank + 1) % self.world_size
 
-        initialize_pg(self.init_method, self.rank, self.world_size)
+        initialize_pg(self.file_init_method, self.rank, self.world_size)
 
         with dist_autograd.context() as context_id:
             t1 = torch.ones(3, 3, requires_grad=True)
@@ -521,7 +541,7 @@ class DistAutogradTest(RpcAgentTestFixture):
     def _test_graph_for_py_nested_call_itself(self, exec_mode):
         dst_rank = (self.rank + 1) % self.world_size
 
-        initialize_pg(self.init_method, self.rank, self.world_size)
+        initialize_pg(self.file_init_method, self.rank, self.world_size)
 
         with dist_autograd.context() as context_id:
             t1 = torch.ones(3, 3, requires_grad=True)
@@ -597,7 +617,7 @@ class DistAutogradTest(RpcAgentTestFixture):
         self._test_graph_for_py_nested_call_itself(ExecMode.REMOTE)
 
     def _test_no_graph_with_tensors_not_require_grad(self, exec_mode):
-        initialize_pg(self.init_method, self.rank, self.world_size)
+        initialize_pg(self.file_init_method, self.rank, self.world_size)
         dst_rank = (self.rank + 1) % self.world_size
         with dist_autograd.context() as context_id:
             t1 = torch.ones(3, 3, requires_grad=False)
@@ -643,7 +663,7 @@ class DistAutogradTest(RpcAgentTestFixture):
         self._test_no_graph_with_tensors_not_require_grad(ExecMode.REMOTE)
 
     def _test_grad_only_on_return_value(self, exec_mode):
-        initialize_pg(self.init_method, self.rank, self.world_size)
+        initialize_pg(self.file_init_method, self.rank, self.world_size)
         dst_rank = (self.rank + 1) % self.world_size
         with dist_autograd.context() as context_id:
             if ExecMode.RPC_SYNC == exec_mode:
@@ -726,7 +746,7 @@ class DistAutogradTest(RpcAgentTestFixture):
         self._test_rpc_complex_args(ExecMode.REMOTE)
 
     def context_cleanup_test_helper(self, rpc_args, func, nested=False):
-        initialize_pg(self.init_method, self.rank, self.world_size)
+        initialize_pg(self.file_init_method, self.rank, self.world_size)
 
         # test that in dist autograd, in the case that tensors communicated over RPC do
         # NOT require grad, we still cleanup the dist autograd contexts created
@@ -855,30 +875,6 @@ class DistAutogradTest(RpcAgentTestFixture):
                 rpc.rpc_sync(
                     worker_name(self._next_rank()), torch.matmul, args=(t1, t2)
                 )
-
-    def _verify_backwards(self, exec_mode, tensors, context_id, local_grads, *args):
-        if exec_mode == ExecMode.LOCAL:
-            torch.autograd.backward(tensors)
-            return [arg.grad for arg in args]
-        else:
-            self._verify_backwards_remote(tensors, context_id, local_grads, *args)
-
-    def _verify_backwards_remote(self, tensors, context_id, local_grads, *args):
-        dist_autograd.backward(context_id, tensors)
-
-        # Verify grads were accumulated appropriately.
-        grads = dist_autograd.get_gradients(context_id)
-        nargs = len(args)
-        ngrads = 0
-        for i in range(0, nargs):
-            if local_grads[i] is not None:
-                self.assertIn(args[i], grads)
-                self.assertEqual(local_grads[i], grads[args[i]])
-                ngrads += 1
-            else:
-                self.assertNotIn(args[i], grads)
-
-        self.assertEqual(ngrads, len(grads))
 
     @dist_init
     def test_backward_no_grad_on_tensor(self):
@@ -1045,8 +1041,7 @@ class DistAutogradTest(RpcAgentTestFixture):
         _set_rpc_done(None, 0)
 
         # wait until all trainers are done
-        for fut in futures:
-            fut.wait()
+        torch.futures.wait_all(futures)
 
     @dist_init
     def test_trainer_ps(self):
@@ -1099,7 +1094,7 @@ class DistAutogradTest(RpcAgentTestFixture):
         for exec_mode in [ExecMode.LOCAL, ExecMode.RPC_SYNC, ExecMode.REMOTE]:
             with dist_autograd.context() as context_id:
                 val = self._exec_func(exec_mode, torch.matmul, t1, t2)
-                val = self._exec_func(exec_mode, torch.chain_matmul, [val, t3, t4])
+                val = self._exec_func(exec_mode, torch.linalg.multi_dot, (val, t3, t4))
                 loss = val.sum()
 
                 ret = self._verify_backwards(
@@ -1140,7 +1135,7 @@ class DistAutogradTest(RpcAgentTestFixture):
                 t2 = tensor_list[2]
                 t3 = tensor_list[4]
 
-                val = self._exec_func(exec_mode, torch.chain_matmul, [t1, t2, t3])
+                val = self._exec_func(exec_mode, torch.linalg.multi_dot, (t1, t2, t3))
 
                 loss = val.sum()
                 ret = self._verify_backwards(
@@ -1208,13 +1203,13 @@ class DistAutogradTest(RpcAgentTestFixture):
                 dist_autograd.backward(context_id, [val.sum()])
 
     @dist_init(clean_shutdown=False)
-    @unittest.skipIf(
+    @sandcastle_skip_if(
         IS_MACOS,
         "Test is flaky on MacOS since libuv error handling is not as robust as TCP",
     )
     def test_backward_node_failure(self):
-        rpc._set_rpc_timeout(timedelta(milliseconds=5000))
-        initialize_pg(self.init_method, self.rank, self.world_size)
+        rpc._set_rpc_timeout(5)  # 5 seconds
+        initialize_pg(self.file_init_method, self.rank, self.world_size)
 
         with dist_autograd.context() as context_id:
             t1 = torch.rand((3, 3), requires_grad=True)
@@ -1228,7 +1223,7 @@ class DistAutogradTest(RpcAgentTestFixture):
 
             # Kill all odd rank nodes.
             if self.rank % 2 == 0:
-                shutdown_error_regex = get_shutdown_error_regex(dist_utils.TEST_CONFIG.rpc_backend_name)
+                shutdown_error_regex = self.get_shutdown_error_regex()
                 # Wait for all other nodes to die.
                 for rank in range(self.world_size):
                     if rank % 2 != 0:
@@ -1376,7 +1371,7 @@ class DistAutogradTest(RpcAgentTestFixture):
         t3 = torch.nn.functional.linear(t1, t2)
         t4 = torch.nn.functional.linear(t2, t3)
         t5 = torch.nn.functional.linear(t3, t4)
-        return torch.chain_matmul(t1, t2, t3, t4, t5)
+        return torch.linalg.multi_dot([t1, t2, t3, t4, t5])
 
     @dist_init
     def test_backward_complex_python_udf(self):
@@ -1399,7 +1394,7 @@ class DistAutogradTest(RpcAgentTestFixture):
     def _python_udf_with_backward_error(t1, t2):
         t3 = t1 + t2
         t4 = SimulateBackwardError.apply(t3)
-        return torch.chain_matmul(t1, t2, t3, t4)
+        return torch.linalg.multi_dot([t1, t2, t3, t4])
 
     @staticmethod
     def _nested_rpc_call_backward_error(t1, t2, dst):
@@ -1410,7 +1405,7 @@ class DistAutogradTest(RpcAgentTestFixture):
             DistAutogradTest._python_udf_with_backward_error,
             args=(t1, t2),
         )
-        return torch.chain_matmul(t1, t2, res)
+        return torch.linalg.multi_dot([t1, t2, res])
 
     @dist_init
     def test_backward_python_udf_error(self):
@@ -1429,24 +1424,15 @@ class DistAutogradTest(RpcAgentTestFixture):
 
     _backward_done = False
 
-    @staticmethod
-    def _set_backward_done():
-        DistAutogradTest._backward_done = True
-
-    @staticmethod
-    def _wait_backward_done():
-        while not DistAutogradTest._backward_done:
-            time.sleep(0.1)
-
     @dist_init(clean_shutdown=False)
-    @unittest.skipIf(
+    @sandcastle_skip_if(
         IS_MACOS,
         "Test is flaky on MacOS since libuv error handling is not as robust as TCP",
     )
     def test_backward_node_failure_python_udf(self):
         # Set a short timeout to quickly time out failed RPCs.
-        rpc._set_rpc_timeout(timedelta(milliseconds=5000))
-        initialize_pg(self.init_method, self.rank, self.world_size)
+        rpc._set_rpc_timeout(5)  # 5 seconds
+        initialize_pg(self.file_init_method, self.rank, self.world_size)
 
         with dist_autograd.context() as context_id:
             t1 = torch.rand((3, 3), requires_grad=True)
@@ -1465,9 +1451,10 @@ class DistAutogradTest(RpcAgentTestFixture):
             if self.rank == 2:
                 return
 
+            store = dist.distributed_c10d._get_default_store()
             if self.rank == 0:
                 # Wait for rank 2 to die.
-                shutdown_error_regex = get_shutdown_error_regex(dist_utils.TEST_CONFIG.rpc_backend_name)
+                shutdown_error_regex = self.get_shutdown_error_regex()
                 wait_until_node_failure(2, shutdown_error_regex)
                 # Shutdown sequence is not very well defined and as a result
                 # we might see any error given by get_shutdown_error_regex().
@@ -1475,30 +1462,20 @@ class DistAutogradTest(RpcAgentTestFixture):
                     # Run backwards, and validate we receive an error since rank 2 is dead.
                     dist_autograd.backward(context_id, [res.sum()])
 
-                # Tell other nodes RPC is done.
-                for i in range(self.world_size):
-                    if i != self.rank and i != 2:
-                        # Due to non-graceful shutdown of workers, this RPC may not return successfully.
-                        # For example, the destination worker could process the RPC, exit and begin shutdown, and
-                        # shutdown RPC before responding and satisfying this RPC. Therefore, we swallow possible errors here.
-                        try:
-                            rpc.rpc_sync(
-                                worker_name(i),
-                                DistAutogradTest._set_backward_done,
-                                args=(),
-                            )
-                        except Exception as e:
-                            pass
+                # Mark rank 0 is done in the store, since the RPC framework on
+                # some nodes might be broken at this point (listenLoop() in
+                # ProcessGroupAgent might've exited).
+                store.set('test_backward_node_failure_python_udf_rank0_done', "True")
             else:
                 # Wait for backward to finish on rank 0.
-                DistAutogradTest._wait_backward_done()
+                store.wait(['test_backward_node_failure_python_udf_rank0_done'], timedelta(seconds=10))
 
     @staticmethod
     def _nested_python_udf(t1, t2, dst):
         t3 = t1 * t2
         t4 = t1 + t2
         res = rpc.rpc_sync(worker_name(dst), my_py_add, args=(t3, t4))
-        return torch.chain_matmul(t1, t2, t3, t4, res)
+        return torch.linalg.multi_dot([t1, t2, t3, t4, res])
 
     @dist_init
     def test_backwards_nested_python_udf(self):
@@ -1508,7 +1485,7 @@ class DistAutogradTest(RpcAgentTestFixture):
         t3 = t1 * t2
         t4 = t1 + t2
         res = t3 + t4
-        loss = torch.chain_matmul(t1, t2, t3, t4, res).sum()
+        loss = torch.linalg.multi_dot([t1, t2, t3, t4, res]).sum()
         torch.autograd.backward([loss])
 
         # Now run distributed autograd.
@@ -1560,7 +1537,7 @@ class DistAutogradTest(RpcAgentTestFixture):
         It is fine for the 'backward' call to throw an exception in this test,
         but the process should not crash.
         """
-        initialize_pg(self.init_method, self.rank, self.world_size)
+        initialize_pg(self.file_init_method, self.rank, self.world_size)
 
         context = dist_autograd._new_context()
         context_id = context._context_id()
@@ -1708,7 +1685,7 @@ class DistAutogradTest(RpcAgentTestFixture):
 
     @dist_init
     def test_debug_info(self):
-        initialize_pg(self.init_method, self.rank, self.world_size)
+        initialize_pg(self.file_init_method, self.rank, self.world_size)
 
         t1 = torch.rand((3, 3), requires_grad=True)
         t2 = torch.rand((3, 3), requires_grad=True)
@@ -1784,7 +1761,7 @@ class DistAutogradTest(RpcAgentTestFixture):
         hammering a single node with a lot of backward() calls.
         """
 
-        initialize_pg(self.init_method, self.rank, self.world_size)
+        initialize_pg(self.file_init_method, self.rank, self.world_size)
         if self.rank != 0:
             # All other ranks schedule work on rank 0.
             threads = []
@@ -1858,7 +1835,7 @@ class DistAutogradTest(RpcAgentTestFixture):
 
     @dist_init(clean_shutdown=False)
     def test_multiple_backward_with_errors(self):
-        initialize_pg(self.init_method, self.rank, self.world_size)
+        initialize_pg(self.file_init_method, self.rank, self.world_size)
         t1 = torch.rand((3, 3), requires_grad=True)
         t2 = torch.rand((3, 3), requires_grad=True)
         with dist_autograd.context() as context_id:
@@ -2091,15 +2068,141 @@ class DistAutogradTest(RpcAgentTestFixture):
             # refcount.
             self.assertTrue(p_g == p_a)
 
-@unittest.skipIf(
-    not torch._six.PY3,
-    "Pytorch distributed autograd package does not support python2",
-)
-class FaultyAgentDistAutogradTest(FaultyRpcAgentTestFixture):
+    @dist_init
+    def test_post_hooks(self):
+        self.hook_called_times = 0
+
+        def post_hook_add_one(output_grads, input_grads):
+            self.hook_called_times += 1
+            return output_grads
+
+        def post_hook_add_two(output_grads, input_grads):
+            self.hook_called_times += 2
+            return output_grads
+
+        t = torch.rand(10, 10, requires_grad=True)
+        a = t + t
+
+        # Register post hooks
+        accumulate_grad_0 = a.grad_fn.next_functions[0][0]
+        accumulate_grad_0.register_hook(post_hook_add_one)
+        accumulate_grad_0.register_hook(post_hook_add_two)
+
+        accumulate_grad_1 = a.grad_fn.next_functions[1][0]
+        accumulate_grad_1.register_hook(post_hook_add_two)
+
+        with dist_autograd.context() as context_id:
+            loss = a.sum()
+            dist_autograd.backward(context_id, [loss])
+            self.assertEqual(5, self.hook_called_times)
+            grads = dist_autograd.get_gradients(context_id)
+            self.assertEqual(1, len(grads))
+            self.assertTrue(t in grads)
+
+    @staticmethod
+    def _slow_add(t1, t2):
+        time.sleep(1)
+        t3 = t1 + t2
+        t3.requires_grad = True
+        return t3
+
+    @dist_init
+    def test_thread_local_context_id(self):
+        t1 = torch.rand((3, 3))
+        t2 = torch.rand((3, 3))
+
+        t3 = t1 + t2
+        t3.requires_grad = True
+        t3.sum().backward()
+
+        dst = worker_name((self.rank + 1) % self.world_size)
+        rref = rpc.remote(dst, DistAutogradTest._slow_add, args=(t1, t2))
+
+        with dist_autograd.context() as context_id:
+            loss = rref.to_here().sum()
+            # due to slow add, the continuation of this backward pass will be
+            # invoked by the previous rpc.remote thread which does not have a
+            # valid context_id. So, this can test whether we propagate
+            # thread_local states properly when jumping across threads on the
+            # server side.
+            dist_autograd.backward(context_id, [loss])
+            self.assertTrue(
+                rpc.rpc_sync(
+                    dst,
+                    _compare_owner_value,
+                    args=(context_id, rref, t3.grad)
+                )
+            )
+
+
+class CudaDistAutogradTest(CommonDistAutogradTest):
+    @skip_if_lt_x_gpu(1)
+    @dist_init
+    def test_gpu_simple(self):
+        t1 = torch.rand(3, 3, requires_grad=True, device="cuda:0")
+        t2 = torch.rand(3, 3, requires_grad=True, device="cuda:0")
+        (t1 + t2).sum().backward()
+        with dist_autograd.context() as context_id:
+            t3 = t1 + t2
+            dist_autograd.backward(context_id, [t3.sum()])
+            grads = dist_autograd.get_gradients(context_id)
+            self.assertEqual(2, len(grads))
+            self.assertEqual(t1.grad, grads[t1])
+            self.assertEqual(t2.grad, grads[t2])
+
+    @skip_if_lt_x_gpu(1)
+    @dist_init
+    def test_gpu_to_cpu_continuation(self):
+        t1 = torch.rand(3, 3, requires_grad=True, device="cuda:0")
+        t2 = torch.rand(3, 3, requires_grad=True)
+        # Run a few iterations.
+        for i in range(3):
+            t1.grad = None
+            t2.grad = None
+            # Root is CPU
+            local_grads = None
+            for exec_mode in [ExecMode.LOCAL, ExecMode.RPC_SYNC]:
+                with dist_autograd.context() as context_id:
+                    t3 = self._exec_func(exec_mode, torch.add, t2, t2)
+                    t4 = t3.cuda(0) + t1
+                    t5 = self._exec_func(exec_mode, torch.add, t4.cpu(), t2)
+                    t6 = t5.cuda(0) + t4
+                    t7 = self._exec_func(exec_mode, torch.add, t6.cpu(), t5)
+                    # Autograd graph consists of CPU -> GPU -> CPU execution.
+                    ret = self._verify_backwards(
+                        exec_mode, [t7.sum()], context_id, local_grads, t1, t2
+                    )
+                    local_grads = ret if ret else local_grads
+
+    @skip_if_lt_x_gpu(1)
+    @dist_init
+    def test_gpu_to_cpu_continuation_gpu_root(self):
+        t1 = torch.rand(3, 3, requires_grad=True, device="cuda:0")
+        t2 = torch.rand(3, 3, requires_grad=True)
+        # Run a few iterations.
+        for i in range(3):
+            t1.grad = None
+            t2.grad = None
+            # Root is CPU
+            local_grads = None
+            for exec_mode in [ExecMode.LOCAL, ExecMode.RPC_SYNC]:
+                with dist_autograd.context() as context_id:
+                    t3 = self._exec_func(exec_mode, torch.add, t2, t2)
+                    t4 = t3.cuda(0) + t1
+                    t5 = self._exec_func(exec_mode, torch.add, t4.cpu(), t2)
+                    t6 = t5.cuda(0) + t4
+                    # Autograd graph consists of CPU -> GPU -> CPU execution.
+                    ret = self._verify_backwards(
+                        exec_mode, [t6.sum()], context_id, local_grads, t1, t2
+                    )
+                    local_grads = ret if ret else local_grads
+
+
+class FaultyAgentDistAutogradTest(RpcAgentTestFixture):
     # Reusing a simplified helper function from DistAutogradTest to ensure
     # autograd context is successfully cleaned up even when RPCs are failing.
     def context_cleanup_test_helper(self, rpc_args, func):
-        initialize_pg(self.init_method, self.rank, self.world_size)
+        initialize_pg(self.file_init_method, self.rank, self.world_size)
 
         # test that in dist autograd, in the case that tensors communicated over RPC do
         # NOT require grad, we still cleanup the dist autograd contexts created
@@ -2134,7 +2237,156 @@ class FaultyAgentDistAutogradTest(FaultyRpcAgentTestFixture):
 
     @dist_init
     def test_verify_backend_options(self):
-        self.assertEqual(self.rpc_backend, rpc.backend_registry.BackendType.FAULTY_PROCESS_GROUP)
-        self.assertEqual(self.rpc_backend_options.num_send_recv_threads, 8)
+        self.assertEqual(self.rpc_backend, rpc.backend_registry.BackendType.FAULTY_TENSORPIPE)
+        self.assertEqual(self.rpc_backend_options.num_worker_threads, 8)
         self.assertEqual(self.rpc_backend_options.num_fail_sends, 3)
         self.assertEqual(len(self.rpc_backend_options.messages_to_fail), 4)
+
+
+class WrapperModule(nn.Module):
+    def __init__(self, model, device):
+        super().__init__()
+        self.model = model.to(device)
+
+    def forward(self, *args):
+        return self.model(*args)
+
+    def gradients(self, ctx_id):
+        grads = dist_autograd.get_gradients(ctx_id)
+        return [grads[p] for p in self.model.parameters()]
+
+
+class TensorPipeCudaDistAutogradTest(RpcAgentTestFixture):
+
+    @skip_if_lt_x_gpu(4)
+    def test_device_maps_backward_pass(self):
+        options = self.rpc_backend_options
+        dst = worker_name((self.rank + 1) % self.world_size)
+
+        # The reverse of this device mapping should be used for the backward pass.
+        options.set_device_map(dst, {self.rank: (self.rank + 1) % self.world_size})
+
+        rpc.init_rpc(
+            name=worker_name(self.rank),
+            backend=self.rpc_backend,
+            rank=self.rank,
+            world_size=self.world_size,
+            rpc_backend_options=options,
+        )
+
+        t1 = torch.rand(10, device=self.rank, requires_grad=True)
+        t2 = torch.rand(10, device=self.rank, requires_grad=True)
+        with dist_autograd.context() as context_id:
+            res = rpc.rpc_sync(dst, torch.add, args=(t1, t2))
+            dist_autograd.backward(context_id, [res.sum()])
+            grads = dist_autograd.get_gradients(context_id)
+            self.assertEqual(torch.ones(10), grads[t1])
+            self.assertEqual(torch.ones(10), grads[t2])
+            self.assertEqual(t1.device, grads[t1].device)
+            self.assertEqual(t2.device, grads[t2].device)
+
+        rpc.shutdown()
+
+    class MyRemoteCompute(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+
+        def forward(self, input):
+            input = input * 2.0
+            return input
+
+    class MyLocalCompute(torch.nn.Module):
+        def __init__(self, next_stage):
+            super().__init__()
+            self.next_stage = next_stage
+
+        def forward(self, input):
+            return self.next_stage.rpc_sync().forward(input)
+
+    @skip_if_lt_x_gpu(4)
+    def test_dist_autograd_sync_streams(self):
+
+        options = self.rpc_backend_options
+        dst = worker_name((self.rank + 1) % self.world_size)
+
+        # The reverse of this device mapping should be used for the backward pass.
+        options.set_device_map(dst, {self.rank: (self.rank + 1) % self.world_size})
+
+        rpc.init_rpc(
+            name=worker_name(self.rank),
+            backend=self.rpc_backend,
+            rank=self.rank,
+            world_size=self.world_size,
+            rpc_backend_options=options,
+        )
+
+        remote_compute = rpc.remote(dst, TensorPipeCudaDistAutogradTest.MyRemoteCompute)
+        local_compute = TensorPipeCudaDistAutogradTest.MyLocalCompute(remote_compute)
+        for _ in range(10):
+            input = torch.rand([1000, 10000], device=self.rank, requires_grad=True)
+            # Run local autograd
+            result = input * 2.0
+            r = random.random()
+            loss = result.sum() * r
+            loss.backward()
+
+            # Run distributed autograd
+            with dist_autograd.context() as context_id:
+                result = local_compute(input)
+                loss = result.sum() * r
+                dist_autograd.backward(context_id, [loss])
+
+                # Compare grads.
+                grads = dist_autograd.get_gradients(context_id)
+                self.assertEqual(input.grad, grads[input])
+
+        rpc.shutdown()
+
+    @skip_if_lt_x_gpu(4)
+    def test_gradients_synchronizations(self):
+        options = self.rpc_backend_options
+        for peer_rank in range(self.world_size):
+            options.set_device_map(worker_name(peer_rank), {self.rank: peer_rank})
+
+        rpc.init_rpc(
+            name=worker_name(self.rank),
+            backend=self.rpc_backend,
+            rank=self.rank,
+            world_size=self.world_size,
+            rpc_backend_options=options,
+        )
+
+        if self.rank == 0:
+            # this is master
+            layers = [nn.Linear(2000, 2000) for _ in range(self.world_size - 1)]
+            local_layers = [l.to(0) for l in layers]
+            remote_layers = []
+            for rank in range(1, self.world_size):
+                remote_layers.append(rpc.remote(
+                    worker_name(rank),
+                    WrapperModule,
+                    args=(layers[rank - 1], rank)
+                ))
+
+            x = torch.randn(5000, 2000).to(0)
+            # local iteration
+            local_model = nn.Sequential(*local_layers)
+            local_model(x).sum().backward()
+
+            # remote iteration
+            with dist_autograd.context() as context_id:
+                for remote_layer in remote_layers:
+                    x = remote_layer.rpc_sync().forward(x)
+
+                dist_autograd.backward(context_id, [x.sum()])
+
+                futs = []
+                for remote_layer in remote_layers:
+                    futs.append(remote_layer.rpc_async().gradients(context_id))
+
+                for i in range(len(futs)):
+                    local_gradients = [p.grad for p in local_layers[i].parameters()]
+                    for g1, g2 in zip(futs[i].wait(), local_gradients):
+                        self.assertEqual(g1, g2)
+
+        rpc.shutdown()

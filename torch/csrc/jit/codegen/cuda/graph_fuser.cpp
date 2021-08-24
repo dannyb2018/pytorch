@@ -1,6 +1,8 @@
 #include <torch/csrc/jit/passes/cuda_graph_fuser.h>
 
 #include <c10/util/Exception.h>
+#include <c10/util/irange.h>
+#include <torch/csrc/jit/codegen/cuda/instrumentation.h>
 #include <torch/csrc/jit/codegen/cuda/interface.h>
 #include <torch/csrc/jit/codegen/cuda/partition.h>
 #include <torch/csrc/jit/frontend/ir_emitter.h>
@@ -14,6 +16,8 @@
 #include <torch/csrc/jit/runtime/custom_operator.h>
 #include <torch/csrc/jit/runtime/operator.h>
 
+#include <torch/csrc/jit/passes/tensorexpr_fuser.h>
+
 #include <queue>
 #include <unordered_map>
 
@@ -21,6 +25,8 @@ namespace torch {
 namespace jit {
 namespace fuser {
 namespace cuda {
+
+constexpr size_t NVRTC_KERNEL_ARG_LIMIT = 128;
 
 namespace {
 
@@ -47,7 +53,7 @@ struct CudaGraphFuser {
   // limit here.
   // This limit is also applied to other devices in the fuser by default.
   // Change with setInputArgLimit
-  size_t subgraph_arg_limit_ = 128;
+  size_t subgraph_arg_limit_ = NVRTC_KERNEL_ARG_LIMIT;
 
   CudaGraphFuser(Block* block, std::shared_ptr<Graph> graph)
       : block_(block), graph_(std::move(graph)) {}
@@ -93,7 +99,7 @@ struct CudaGraphFuser {
     std::unordered_map<Value*, Value*> inner_to_outer;
     auto inner_inputs = producer_subgraph->inputs();
     auto outer_inputs = producer_group->inputs();
-    for (size_t i = 0; i < inner_inputs.size(); ++i) {
+    for (const auto i : c10::irange(inner_inputs.size())) {
       inner_to_outer[inner_inputs[i]] = outer_inputs[i];
     }
 
@@ -105,13 +111,14 @@ struct CudaGraphFuser {
       temporary_nodes.emplace_back(outer);
       auto inner_outputs = inner->outputs();
       auto outer_outputs = outer->outputs();
-      for (size_t i = 0; i < inner_outputs.size(); ++i)
+      for (const auto i : c10::irange(inner_outputs.size())) {
         inner_to_outer[inner_outputs[i]] = outer_outputs[i];
+      }
     }
 
     // Replace uses of producer_group outputs and destroy the producer
     auto subgraph_outputs = producer_subgraph->outputs();
-    for (size_t i = 0; i < subgraph_outputs.size(); ++i) {
+    for (const auto i : c10::irange(subgraph_outputs.size())) {
       auto outer_output = inner_to_outer.at(subgraph_outputs[i]);
       producer_group->outputs()[i]->replaceAllUsesWith(outer_output);
     }
@@ -127,7 +134,7 @@ struct CudaGraphFuser {
       Node* merged = mergeNodeIntoGroup(consumer_group, node);
       // If any of the outputs are still used then we need to add them
       auto outputs = node->outputs();
-      for (size_t i = 0; i < outputs.size(); ++i) {
+      for (const auto i : c10::irange(outputs.size())) {
         auto output = outputs[i];
         if (output->uses().size() == 0)
           continue;
@@ -164,6 +171,8 @@ struct CudaGraphFuser {
     WithInsertPoint guard(*subgraph.nodes().begin());
     for (auto input : n->inputs()) {
       if (inputs_map.count(input) == 0) {
+        // TODO: we are following the convention for no good reason;
+        //       we don't need tensor to come before any other inputs.
         if (input->type()->isSubtypeOf(TensorType::get())) {
           auto in_group = subgraph.insertInput(tensor_insert_idx);
           in_group->setType(input->type());
@@ -171,6 +180,7 @@ struct CudaGraphFuser {
           group->insertInput(tensor_insert_idx, input);
           tensor_insert_idx++;
         } else if (
+            // TODO: extend the supporting inputs here.
             (input->type()->isSubtypeOf(FloatType::get()) &&
              input->node()->kind() != prim::Constant) ||
             (n->kind() == aten::_grad_sum_to_size &&
@@ -179,18 +189,20 @@ struct CudaGraphFuser {
           in_group->setType(input->type());
           inputs_map[input] = in_group;
           group->addInput(input);
-        } else {
-          // We don't support passing in scalars as arguments to fused kernels,
-          // so we generally don't allow fusing tensor-scalar operations unless
-          // the scalar is constant. In those cases we inline the constants
-          // directly in the body of the fused group.
-          AT_ASSERT(input->node()->kind() == prim::Constant);
+        } else if (input->node()->kind() == prim::Constant) {
+          // inline the constants directly in the body of the fused group.
           Node* in_const =
               subgraph.createClone(input->node(), [](Value*) -> Value* {
                 throw std::runtime_error("unexpected input");
               });
           subgraph.insertNode(in_const);
           inputs_map[input] = in_const->output();
+        } else {
+          // TODO: we need to figure out what are supported input scalar
+          auto in_group = subgraph.addInput();
+          in_group->setType(input->type());
+          inputs_map[input] = in_group;
+          group->addInput(input);
         }
       }
     }
@@ -377,7 +389,7 @@ struct CudaGraphFuser {
     Node* bchunk =
         chunk->owningGraph()->create(prim::BroadcastingChunk, nchunks);
     bchunk->addInput(chunk->input());
-    for (size_t i = 0; i < nchunks; ++i) {
+    for (const auto i : c10::irange(nchunks)) {
       auto* old_output = chunk->outputs().at(i);
       auto* new_output = bchunk->outputs().at(i);
       new_output->copyMetadata(old_output);
@@ -499,7 +511,7 @@ struct CudaGraphFuser {
     WithInsertPoint guard(bchunk->next());
 
     std::vector<Value*> producer_chunk_outputs;
-    for (size_t i = 0; i < nchunks; i++) {
+    for (const auto i : c10::irange(nchunks)) {
       producer_chunk_outputs.push_back(
           bchunk->output(nchunks * producer_index + i));
     }
@@ -521,10 +533,10 @@ struct CudaGraphFuser {
       auto it = std::find(bchunk_inputs.begin(), bchunk_inputs.end(), input);
       if (it != bchunk_inputs.end()) {
         chunked_inputs.emplace_back();
-        auto input_index = std::distance(bchunk_inputs.begin(), it);
-        for (size_t chunk = 0; chunk < nchunks; ++chunk) {
+        const auto input_index = std::distance(bchunk_inputs.begin(), it);
+        for (const auto chunki : c10::irange(nchunks)) {
           chunked_inputs.back().push_back(
-              bchunk->outputs().at(nchunks * input_index + chunk));
+              bchunk->outputs().at(nchunks * input_index + chunki));
         }
         continue;
       }
@@ -557,6 +569,7 @@ struct CudaGraphFuser {
         if (original_input->type()->isSubtypeOf(TensorType::get())) {
           AT_ASSERT(chunked_inputs_it != chunked_inputs.end());
           chunked_op->addInput(
+              // NOLINTNEXTLINE(clang-analyzer-core.DivideZero)
               chunked_inputs_it->at(chunk_sel->offset() % nchunks));
           ++chunked_inputs_it;
         } else {
@@ -568,7 +581,8 @@ struct CudaGraphFuser {
     }
 
     bchunk->removeInput(producer_index);
-    for (size_t i = 0; i < nchunks; i++) {
+    // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores,clang-diagnostic-unused-variable)
+    for (const auto i : c10::irange(nchunks)) {
       bchunk->eraseOutput(nchunks * producer_index);
     }
 
@@ -646,8 +660,7 @@ struct CudaGraphFuser {
         Node* new_chunk =
             graph->insertNode(graph->create(prim::ConstantChunk, input, 0));
         new_chunk->copyAttributes(*bchunk);
-        for (size_t output_offset = 0; output_offset < nchunks;
-             output_offset++) {
+        for (const auto output_offset : c10::irange(nchunks)) {
           auto new_output = new_chunk->addOutput();
           auto old_output =
               bchunk->outputs().at(input_offset * nchunks + output_offset);
@@ -669,7 +682,6 @@ struct CudaGraphFuser {
   // Builds up expressions that compute shapes of all intermediates (and
   // outputs) of the fusion group, based on the sizes of inputs. You should run
   // DCE to remove those that you end up not using.
-  /*
   std::unordered_map<Value*, Value*> buildShapeExpressions(Node* fusion_group) {
     WithInsertPoint insert_guard{fusion_group->next()};
     std::unordered_map<Value*, Value*> shape_of;
@@ -680,7 +692,7 @@ struct CudaGraphFuser {
     auto inputs = fusion_group->inputs();
     auto sinputs = subgraph->inputs();
     AT_ASSERT(inputs.size() == sinputs.size());
-    for (size_t i = 0; i < inputs.size(); ++i) {
+    for (const auto i : c10::irange(inputs.size())) {
       if (inputs[i]->type()->isSubtypeOf(TensorType::get())) {
         shape_of[sinputs[i]] = graph->insert(aten::size, {inputs[i]});
       }
@@ -693,7 +705,7 @@ struct CudaGraphFuser {
     auto outputs = fusion_group->outputs();
     auto soutputs = subgraph->outputs();
     AT_ASSERT(outputs.size() == soutputs.size());
-    for (size_t i = 0; i < outputs.size(); ++i) {
+    for (const auto i : c10::irange(outputs.size())) {
       if (usedOnlyInSize(outputs[i]))
         continue;
       shape_of[soutputs[i]] = graph->insert(aten::size, {outputs[i]});
@@ -728,6 +740,38 @@ struct CudaGraphFuser {
         shape_of.emplace(outputs.at(outputs.size() - 1), last_size);
         continue;
       }
+      // extended shape expression support to reduction operations
+      // TODO: `aten::sum` is too flexible, we should restrict for a better
+      // match
+      if (n->kind() == aten::sum) {
+        // TODO: expand support to wire non-constant inputs, this is currently
+        // blocked by profiling executor not capable of profiling scalar inputs.
+        TORCH_INTERNAL_ASSERT(
+            n->input(1)->node()->kind() == prim::Constant &&
+                n->input(2)->node()->kind() == prim::Constant,
+            "only supports reduction axes and keepdim being constant");
+
+        // hmmm, do I need to setInsertPoint...
+        Node* in1_const =
+            graph->createClone(n->input(1)->node(), [](Value*) -> Value* {
+              throw std::runtime_error("unexpected input");
+            });
+        graph->insertNode(in1_const);
+        Node* in2_const =
+            graph->createClone(n->input(2)->node(), [](Value*) -> Value* {
+              throw std::runtime_error("unexpected input");
+            });
+        graph->insertNode(in2_const);
+
+        std::vector<Value*> inputs = {
+            shape_of.at(n->input(0)), in1_const->output(), in2_const->output()};
+        Node* size_node =
+            graph->insertNode(graph->create(prim::ReductionSizes, inputs, 1));
+        Value* size = size_node->output(0);
+        size->setType(ListType::ofInts());
+        shape_of.emplace(n->output(), size);
+        continue;
+      }
       auto tensor_inputs = filter(n->inputs(), [](Value* v) {
         return v->type()->isSubtypeOf(TensorType::get());
       });
@@ -745,6 +789,8 @@ struct CudaGraphFuser {
       return;
     auto subgraph = fusion_group->g(attr::Subgraph);
 
+    // TODO: failure in buildShapeExpressions should not break fusion execution,
+    // we can add a try/catch here to bailout from removeOutputsUsedOnlyInSize.
     auto shape_of = buildShapeExpressions(fusion_group);
     auto outputs = fusion_group->outputs().vec();
     auto soutputs = subgraph->outputs().vec();
@@ -766,7 +812,6 @@ struct CudaGraphFuser {
       }
     }
   }
-  */
 
   void refreshAliasDb() {
     aliasDb_ = torch::make_unique<AliasDb>(graph_);
@@ -806,6 +851,7 @@ struct CudaGraphFuser {
       any_changed = false;
       refreshAliasDb();
       for (auto it = block_->nodes().rbegin(); it != block_->nodes().rend();) {
+        // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
         bool changed;
         std::tie(it, changed) = scanNode(*it);
         any_changed |= changed;
@@ -827,9 +873,9 @@ struct CudaGraphFuser {
     //}
 
     // Remove outputs that have been added only because we need their size
-    // for (Node* n : block_->nodes()) {
-    //  removeOutputsUsedOnlyInSize(n);
-    //}
+    for (Node* n : block_->nodes()) {
+      removeOutputsUsedOnlyInSize(n);
+    }
 
     for (Node* node : block_->nodes()) {
       for (Block* sub_block : node->blocks()) {
@@ -840,6 +886,8 @@ struct CudaGraphFuser {
 };
 
 void compileFusionRecursive(Block* block) {
+  FUSER_PERF_SCOPE("compileFusionRecursive");
+
   for (auto node : block->nodes()) {
     if (node->kind() == prim::CudaFusionGroup) {
       fuser::cuda::compileFusionGroup(node);
@@ -851,6 +899,8 @@ void compileFusionRecursive(Block* block) {
 }
 
 void PeepholeOptimizeShapeExpressions(Block* block) {
+  FUSER_PERF_SCOPE("PeepholeOptimizeShapeExpressions");
+
   auto nodes = block->nodes();
   for (auto it = nodes.begin(); it != nodes.end(); ++it) {
     Node* node = *it;
@@ -902,10 +952,139 @@ void PeepholeOptimizeShapeExpressions(Block* block) {
   }
 }
 
+//! [ Note -- CudaFusionGuard implementation ]
+//!
+//! shamelessly copying code from NNC (tensorexpr_fuser)  with very little
+//! modification, original code at:
+//! `../../passes/tensorexpr_fuser.cpp:guardFusionGroup`
+//!
+//! Add prim::CudaFusionGuard node to ensure that accepted profiling information
+//! is not violated at runtime.
+//!
+//! We replace a single
+//!
+//!   outputs = prim::CudaFusionGroup[cache_id](inputs)
+//!
+//! with the following pattern:
+//!
+//!   %1 : bool = prim::CudaFusionGuard[types=[...]](inputs)
+//!   outputs = prim::If(%1)
+//!     block0():
+//!       outputs = prim::CudaFusionGroup[cache_id](inputs)
+//!       -> (outputs)
+//!     block1():
+//!       %2 : Function = prim::Constant[name="fallback_function", fallback=1]()
+//!       otuputs = prim::CallFunction(%2, inputs)
+//!       -> (outputs)
+//!
+//! `prim::CudaFusionGuard` stores all profiled data type in attribute
+//! `attr::types`.
+//! At runtime, we check input tensors against our profiled data type and return
+//! an output holds the result of the check (bool).
+//! See [ Note -- type guard logic in CudaFusionGuard ]
+//!
+//! This ensures that `prim::CudaFusionGroup` only execute compatible inputs.
+//! In case of check failure, execution goes through false block, which
+//! recursively goes along another profiling / optimization iteration. (could be
+//! tuned by `bailout_depth`)
+//!
+//! TODO: we also need to assert/check reduction axes and replace it with
+//! constants in `CudaFusionGroup`
+void guardFusionGroup(Node* fusion) {
+  // Fixup types of the subgraph inputs
+  std::vector<TypePtr> guard_types;
+  std::vector<Value*> inputs_to_check;
+  for (Value* input : fusion->inputs()) {
+    // We only check inputs of the fusion group and expect NNC to infer
+    // intermediates and outputs shapes
+    if (!input->type()->cast<TensorType>()) {
+      continue;
+    }
+
+    // note: modified from original implementation, we are guarding fusion
+    //       outputs
+    if (input->node()->kind() == prim::Constant) {
+      continue;
+    }
+    inputs_to_check.push_back(input);
+    guard_types.push_back(input->type());
+  }
+  if (!inputs_to_check.size()) {
+    return;
+  }
+
+  Node* typecheck_node = fusion->owningGraph()
+                             ->create(prim::CudaFusionGuard, inputs_to_check, 1)
+                             ->insertBefore(fusion);
+  // fix output to BoolType
+  typecheck_node->output()->setType(BoolType::get());
+  Value* typecheck_result = typecheck_node->output();
+  typecheck_node->tys_(attr::types, guard_types);
+
+  std::unordered_map<Value*, Value*> typechecked_inputs;
+
+  // Insert if block
+  auto versioning_if =
+      fusion->owningGraph()
+          ->create(prim::If, {typecheck_result}, fusion->outputs().size())
+          ->insertAfter(typecheck_node);
+  for (size_t idx = 0; idx < fusion->outputs().size(); ++idx) {
+    versioning_if->output(idx)->setType(fusion->output(idx)->type());
+    fusion->output(idx)->replaceAllUsesWith(versioning_if->output(idx));
+  }
+  auto true_block = versioning_if->addBlock();
+  auto false_block = versioning_if->addBlock();
+
+  // Fill in the false block. It should contain the unoptimized
+  // copy of the fused subgraph.
+  auto& subgraph = *fusion->g(attr::Subgraph);
+  WithInsertPoint guard(false_block->return_node());
+  const auto subgraph_outputs =
+      insertGraph(*fusion->owningGraph(), subgraph, fusion->inputs());
+  for (Value* output : subgraph_outputs) {
+    false_block->registerOutput(output);
+  }
+
+  // types get copied to the fallback graph, so remove specializations before
+  // replacing
+  // TODO: this is not exposed here, I need to remove that before inserting the
+  //       graph
+  // removeTensorTypeSpecializations(false_block);
+  replaceBlockWithFallbackGraph(false_block, fusion->inputs());
+
+  // Fill in the true block. It has all inputs type-checked and its
+  // body should be the fusion group node.
+  fusion->moveBefore(true_block->return_node());
+  for (Value* output : fusion->outputs()) {
+    true_block->registerOutput(output);
+  }
+}
+
+void guardFusionGroups(Block* block) {
+  std::vector<Node*> fusions;
+  for (Node* n : block->nodes()) {
+    for (Block* b : n->blocks()) {
+      guardFusionGroups(b);
+    }
+    if (n->kind() == prim::CudaFusionGroup) {
+      fusions.push_back(n);
+    }
+  }
+  for (Node* fusion : fusions) {
+    guardFusionGroup(fusion);
+  }
+}
+
 } // anonymous namespace
 
-TORCH_CUDA_API void CudaFuseGraph(std::shared_ptr<Graph>& graph) {
+void CudaFuseGraph(std::shared_ptr<Graph>& graph) {
+  FUSER_PERF_SCOPE("CudaFuseGraph");
+  // TODO: we need to properly restore shape information after fusion.
+  // shamelessly use tool from NNC.
+  RemoveProfileNodesAndSpecializeTypes(graph);
+
   CudaGraphFuser(graph->block(), graph).run();
+  guardFusionGroups(graph->block());
   // After FuseGraph some common subexpressions may come back
   EliminateCommonSubexpression(graph);
   // We might have emitted a fair amount of useless shape propagating code, so
@@ -913,6 +1092,11 @@ TORCH_CUDA_API void CudaFuseGraph(std::shared_ptr<Graph>& graph) {
   EliminateDeadCode(graph);
   // Improve the quality of shape propagation code that was left
   PeepholeOptimizeShapeExpressions(graph->block());
+
+  // TODO: we need to properly restore shape information after fusion.
+  // shamelessly use tool from NNC.
+  RemoveTensorTypeSpecializations(graph);
+
   // Compile CudaFusionGroup
   compileFusionRecursive(graph->block());
 }

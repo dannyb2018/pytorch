@@ -1,3 +1,4 @@
+#include <ATen/Config.h>
 #if AT_PARALLEL_OPENMP || AT_PARALLEL_NATIVE || AT_PARALLEL_NATIVE_TBB
 #include <ATen/Parallel.h>
 #include <ATen/PTThreadPool.h>
@@ -67,21 +68,27 @@ int get_num_interop_threads() {
   }
 }
 
+namespace internal {
+void launch_no_thread_state(std::function<void()> fn) {
+#if AT_EXPERIMENTAL_SINGLE_THREAD_POOL
+  intraop_launch(std::move(fn));
+#else
+  get_pool().run(std::move(fn));
+#endif
+}
+} // namespace internal
+
 void launch(std::function<void()> func) {
-  auto fn = std::bind([](
+  // NOLINTNEXTLINE(modernize-avoid-bind)
+  internal::launch_no_thread_state(std::bind([](
     std::function<void()> f, ThreadLocalState thread_locals) {
+      // NOLINTNEXTLINE(performance-move-const-arg)
       ThreadLocalStateGuard guard(std::move(thread_locals));
       f();
     },
     std::move(func),
     ThreadLocalState()
-  );
-
-#if AT_EXPERIMENTAL_SINGLE_THREAD_POOL
-  intraop_launch(fn);
-#else
-  get_pool().run(fn);
-#endif
+  ));
 }
 
 } // namespace at

@@ -10,11 +10,14 @@ if(USE_FAKELOWP)
 
   # We will only build the perf kernel files if the compiler supports avx2
   # extensions.
-  if(CAFFE2_COMPILER_SUPPORTS_AVX2_EXTENSIONS)
-    add_library(caffe2_fakelowp_ops OBJECT ${FAKELOWP_CPU_SRCS})  
-    add_dependencies(caffe2_fakelowp_ops fbgemm Caffe2_PROTO c10)
+  if(CXX_AVX2_FOUND)
+    add_library(caffe2_fakelowp_ops OBJECT ${FAKELOWP_CPU_SRCS})
+    add_dependencies(caffe2_fakelowp_ops fbgemm cpuinfo Caffe2_PROTO c10 aten_op_header_gen)
     target_include_directories(caffe2_fakelowp_ops BEFORE
       PRIVATE $<BUILD_INTERFACE:${FBGEMM_SOURCE_DIR}/include>)
+    target_include_directories(caffe2_fakelowp_ops BEFORE
+      PRIVATE $<BUILD_INTERFACE:${CPUINFO_SOURCE_DIR}/include>)
+
     if(MSVC)
       set_property(SOURCE ${FAKELOWP_CPU_SRCS}
         APPEND_STRING PROPERTY COMPILE_FLAGS " /arch:AVX2 ")
