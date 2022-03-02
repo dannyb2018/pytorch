@@ -2,7 +2,6 @@
 
 #include <c10/util/Logging.h>
 #include <c10/util/irange.h>
-#include <torch/csrc/jit/tensorexpr/dim_arg.h>
 #include <torch/csrc/jit/tensorexpr/reduction.h>
 
 namespace torch {
@@ -31,8 +30,8 @@ StmtPtr Tensor::constructStmt(
     for (const auto i : c10::irange(reduce_ndim)) {
       // Going in reverse order: from innermost loop to the outermost
       size_t dim_index = reduce_ndim - i - 1;
-      s = alloc<For>(
-          reduce_args[dim_index], alloc<IntImm>(0), reduce_dims[dim_index], s);
+      auto const& dim = reduce_dims[dim_index];
+      s = alloc<For>(reduce_args[dim_index], immLike(dim, 0), dim, s);
     }
     if (init_expr) {
       StorePtr init_stmt = alloc<Store>(buf(), indices, init_expr);
@@ -43,138 +42,108 @@ StmtPtr Tensor::constructStmt(
   for (const auto i : c10::irange(ndim)) {
     // Going in reverse order: from innermost loop to the outermost
     size_t dim_index = ndim - i - 1;
-    s = alloc<For>(args[dim_index], alloc<IntImm>(0), buf()->dim(dim_index), s);
+    auto const& dim = buf()->dim(dim_index);
+    s = alloc<For>(args[dim_index], immLike(dim, 0), dim, s);
   }
   return s;
 }
 
 Tensor Compute(
     const std::string& name,
-    const std::vector<DimArg>& dim_args,
+    const std::vector<ExprHandle>& dims,
     const std::function<ExprHandle(const std::vector<VarHandle>&)>& body_func) {
-  std::vector<ExprPtr> dims;
-  std::vector<VarPtr> args;
-  unpack_dim_args(dim_args, &dims, &args);
-  ExprPtr body = body_func(VarVectorToVarHandleVector(args)).node();
-  BufPtr buf = alloc<Buf>(name, dims, body->dtype());
+  std::vector<VarHandle> args = create_index_vars(dims);
+  ExprHandle body = body_func(args);
+  BufHandle buf = Buf::make(name, dims, body.dtype());
   return Tensor(buf, args, body);
 }
 
 Tensor Compute(
     const std::string& name,
-    const std::vector<DimArg>& dim_args,
+    const std::vector<ExprHandle>& dims,
     const std::function<ExprHandle(const VarHandle&)>& body_func) {
-  if (dim_args.size() != 1) {
+  if (dims.size() != 1) {
     throw malformed_input("mismatch between body and arg size (1)");
   }
 
-  std::vector<ExprPtr> dims;
-  std::vector<VarPtr> args;
-  unpack_dim_args(dim_args, &dims, &args);
-  ExprPtr body = body_func(VarHandle(args[0])).node();
-  BufPtr buf = alloc<Buf>(name, dims, body->dtype());
+  std::vector<VarHandle> args = create_index_vars(dims);
+  ExprHandle body = body_func(args[0]);
+  BufHandle buf = Buf::make(name, dims, body.dtype());
   return Tensor(buf, args, body);
 }
 
 Tensor Compute(
     const std::string& name,
-    const std::vector<DimArg>& dim_args,
+    const std::vector<ExprHandle>& dims,
     const std::function<ExprHandle(const VarHandle&, const VarHandle&)>&
         body_func) {
-  if (dim_args.size() != 2) {
+  if (dims.size() != 2) {
     throw malformed_input("mismatch between body and arg size (2)");
   }
-  std::vector<ExprPtr> dims;
-  std::vector<VarPtr> args;
-  unpack_dim_args(dim_args, &dims, &args);
-  ExprPtr body = body_func(VarHandle(args[0]), VarHandle(args[1])).node();
-  BufPtr buf = alloc<Buf>(name, dims, body->dtype());
+  std::vector<VarHandle> args = create_index_vars(dims);
+  ExprHandle body = body_func(args[0], args[1]);
+  BufHandle buf = Buf::make(name, dims, body.dtype());
   return Tensor(buf, args, body);
 }
 
 Tensor Compute(
     const std::string& name,
-    const std::vector<DimArg>& dim_args,
+    const std::vector<ExprHandle>& dims,
     const std::function<
         ExprHandle(const VarHandle&, const VarHandle&, const VarHandle&)>&
         body_func) {
-  if (dim_args.size() != 3) {
+  if (dims.size() != 3) {
     throw malformed_input("mismatch between body and arg size (3)");
   }
-  std::vector<ExprPtr> dims;
-  std::vector<VarPtr> args;
-  unpack_dim_args(dim_args, &dims, &args);
-  ExprPtr body =
-      body_func(VarHandle(args[0]), VarHandle(args[1]), VarHandle(args[2]))
-          .node();
-  BufPtr buf = alloc<Buf>(name, dims, body->dtype());
+  std::vector<VarHandle> args = create_index_vars(dims);
+  ExprHandle body = body_func(args[0], args[1], args[2]);
+  BufHandle buf = Buf::make(name, dims, body.dtype());
   return Tensor(buf, args, body);
 }
 
 Tensor Compute(
     const std::string& name,
-    const std::vector<DimArg>& dim_args,
+    const std::vector<ExprHandle>& dims,
     const std::function<ExprHandle(
         const VarHandle&,
         const VarHandle&,
         const VarHandle&,
         const VarHandle&)>& body_func) {
-  if (dim_args.size() != 4) {
+  if (dims.size() != 4) {
     throw malformed_input("mismatch between body and arg size (4)");
   }
-  std::vector<ExprPtr> dims;
-  std::vector<VarPtr> args;
-  unpack_dim_args(dim_args, &dims, &args);
-  ExprPtr body = body_func(
-                     VarHandle(args[0]),
-                     VarHandle(args[1]),
-                     VarHandle(args[2]),
-                     VarHandle(args[3]))
-                     .node();
-  BufPtr buf = alloc<Buf>(name, dims, body->dtype());
+  std::vector<VarHandle> args = create_index_vars(dims);
+  ExprHandle body = body_func(args[0], args[1], args[2], args[3]);
+  BufHandle buf = Buf::make(name, dims, body.dtype());
   return Tensor(buf, args, body);
 }
 
 Tensor Reduce(
     const std::string& name,
-    const std::vector<DimArg>& dim_args,
-    const Reducer& reducer,
-    const Placeholder& buffer,
-    const std::vector<DimArg>& reduce_args) {
-  return Reduce(
-      name,
-      dim_args,
-      reducer,
-      [&](ParameterList& p) { return buffer.load(p); },
-      reduce_args);
-}
-
-Tensor Reduce(
-    const std::string& name,
-    const std::vector<DimArg>& dim_args,
+    const std::vector<ExprHandle>& dims,
     const Reducer& reducer,
     const BufHandle& buffer,
-    const std::vector<DimArg>& reduce_args) {
+    const std::vector<ExprHandle>& reduce_dims) {
   return Reduce(
       name,
-      dim_args,
+      dims,
       reducer,
       [&](ParameterList& p) { return buffer.load(p); },
-      reduce_args);
+      reduce_dims);
 }
 
 Tensor Reduce(
     const std::string& name,
-    const std::vector<DimArg>& dim_args,
+    const std::vector<ExprHandle>& dims,
     const Reducer& reducer,
     Tensor tensor,
-    const std::vector<DimArg>& reduce_args) {
+    const std::vector<ExprHandle>& reduce_dims) {
   return Reduce(
       name,
-      dim_args,
+      dims,
       reducer,
       [&](ParameterList& p) { return tensor.load(p); },
-      reduce_args);
+      reduce_dims);
 }
 
 } // namespace tensorexpr

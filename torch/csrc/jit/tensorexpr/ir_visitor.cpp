@@ -79,7 +79,7 @@ void IRVisitor::visit(CompareSelectPtr v) {
 // NOLINTNEXTLINE
 #define IMM_VISIT(Type, Name) \
   void IRVisitor::visit(Name##ImmPtr v) {}
-AT_FORALL_SCALAR_TYPES_AND2(Bool, Half, IMM_VISIT);
+AT_FORALL_SCALAR_TYPES_AND3(Bool, Half, BFloat16, IMM_VISIT);
 #undef IMM_VISIT
 
 void IRVisitor::visit(CastPtr v) {
@@ -104,6 +104,12 @@ void IRVisitor::visit(LoadPtr v) {
 
 void IRVisitor::visit(BufPtr v) {
   v->base_handle()->accept(this);
+  if (v->qscale()) {
+    v->qscale()->accept(this);
+  }
+  if (v->qzero()) {
+    v->qzero()->accept(this);
+  }
 }
 
 void IRVisitor::visit(StorePtr v) {
@@ -175,6 +181,11 @@ void IRVisitor::visit(AllocatePtr v) {
 
 void IRVisitor::visit(FreePtr v) {
   v->buffer_var()->accept(this);
+}
+
+void IRVisitor::visit(PlacementAllocatePtr v) {
+  v->buf()->accept(this);
+  v->buf_to_reuse()->accept(this);
 }
 
 void IRVisitor::visit(LetPtr v) {

@@ -38,16 +38,18 @@ static inline void trim(std::string& s) {
 }
 } // namespace
 
-#define ASSERT_THROWS_WITH_MESSAGE(statement, substring)              \
-  try {                                                               \
-    (void)statement;                                                  \
-    FAIL();                                                           \
-  } catch (const std::exception& e) {                                 \
-    std::string substring_s(substring);                               \
-    trim(substring_s);                                                \
-    auto exception_string = std::string(e.what());                    \
-    trim(exception_string);                                           \
-    ASSERT_NE(exception_string.find(substring_s), std::string::npos); \
+#define ASSERT_THROWS_WITH_MESSAGE(statement, substring)             \
+  try {                                                              \
+    (void)statement;                                                 \
+    FAIL();                                                          \
+  } catch (const std::exception& e) {                                \
+    std::string substring_s(substring);                              \
+    trim(substring_s);                                               \
+    auto exception_string = std::string(e.what());                   \
+    trim(exception_string);                                          \
+    ASSERT_NE(exception_string.find(substring_s), std::string::npos) \
+        << " Error was: \n"                                          \
+        << exception_string;                                         \
   }
 
 namespace torch {
@@ -74,6 +76,7 @@ std::pair<tensor_list, tensor_list> runGradient(
 
 std::shared_ptr<Graph> build_lstm();
 std::shared_ptr<Graph> build_mobile_export_analysis_graph();
+std::shared_ptr<Graph> build_mobile_export_with_out();
 std::shared_ptr<Graph> build_mobile_export_analysis_graph_with_vararg();
 std::shared_ptr<Graph> build_mobile_export_analysis_graph_nested();
 std::shared_ptr<Graph> build_mobile_export_analysis_graph_non_const();

@@ -35,6 +35,8 @@ using StmtPtr = NodePtr<Stmt>;
 using VarPtr = NodePtr<Var>;
 
 class ExprHandle;
+class VarHandle;
+class BufHandle;
 
 class Add;
 class And;
@@ -100,6 +102,7 @@ class Cond;
 class ExternalCall;
 class For;
 class Free;
+class PlacementAllocate;
 class SyncThreads;
 using AllocatePtr = NodePtr<Allocate>;
 using AtomicAddPtr = NodePtr<AtomicAdd>;
@@ -108,12 +111,13 @@ using CondPtr = NodePtr<Cond>;
 using ExternalCallPtr = NodePtr<ExternalCall>;
 using ForPtr = NodePtr<For>;
 using FreePtr = NodePtr<Free>;
+using PlacementAllocatePtr = NodePtr<PlacementAllocate>;
 using SyncThreadsPtr = NodePtr<SyncThreads>;
 
 #define IMM_DECLARE(Type, Name) \
   class Name##Imm;              \
   using Name##ImmPtr = NodePtr<Name##Imm>;
-AT_FORALL_SCALAR_TYPES_AND2(Bool, Half, IMM_DECLARE);
+AT_FORALL_SCALAR_TYPES_AND3(Bool, Half, BFloat16, IMM_DECLARE);
 #undef IMM_DECLARE
 
 } // namespace tensorexpr
