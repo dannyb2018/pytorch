@@ -5,12 +5,12 @@
 #include <unordered_map>
 #include <vector>
 
+#include <c10/util/Exception.h>
 #include <c10/util/SmallVector.h>
 #include <c10/util/intrusive_ptr.h>
 #include <torch/csrc/jit/frontend/lexer.h>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 // Trees are used to represent all forms of TC IR, pre- and post-typechecking.
 // Rather than have a full class hierarchy for all TC statements, trees are a
@@ -38,10 +38,10 @@ struct Tree : c10::intrusive_ptr_target {
     return true;
   }
   virtual const SourceRange& range() const {
-    throw std::runtime_error("is an Atom");
+    TORCH_CHECK(false, "is an Atom");
   }
   virtual const std::string& stringValue() const {
-    throw std::runtime_error("stringValue can only be called on TK_STRING");
+    TORCH_CHECK(false, "stringValue can only be called on TK_STRING");
   }
   virtual const TreeList& trees() const {
     static const TreeList empty_trees = {};
@@ -80,13 +80,16 @@ struct Tree : c10::intrusive_ptr_target {
       int lineno,
       size_t expected_subtrees,
       bool allow_more) const {
-    if (kind() != k) {
-      std::stringstream ss;
-      ss << filename << ":" << lineno << ": expecting kind '" << kindToString(k)
-         << "' but found '" << kindToString(kind()) << "'\n";
-      range().highlight(ss);
-      throw std::runtime_error(ss.str());
-    }
+    TORCH_CHECK(
+        kind() == k,
+        filename,
+        ":",
+        lineno,
+        ": expecting kind '",
+        kindToString(k),
+        "' but found '",
+        kindToString(kind()),
+        "'\n");
     if (trees().size() < expected_subtrees ||
         (!allow_more && trees().size() != expected_subtrees)) {
       std::stringstream ss;
@@ -94,7 +97,7 @@ struct Tree : c10::intrusive_ptr_target {
          << expected_subtrees << " subtrees, but found only " << trees().size()
          << "\n";
       range().highlight(ss);
-      throw std::runtime_error(ss.str());
+      TORCH_CHECK(false, ss.str());
     }
   }
   ~Tree() override = default;
@@ -209,12 +212,11 @@ struct pretty_tree {
 
 static inline std::ostream& operator<<(std::ostream& out, pretty_tree t_) {
   t_.print(out, t_.tree, 0);
-  return out << std::endl;
+  return out << '\n';
 }
 
 static inline std::ostream& operator<<(std::ostream& out, const TreeRef& t) {
   return out << pretty_tree(t);
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

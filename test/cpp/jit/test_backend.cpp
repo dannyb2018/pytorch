@@ -308,6 +308,7 @@ TEST(BackendTest, TestConsistencyOfCompositeWithSetStates) {
   c._save_for_mobile(ss);
   auto mc = _load_for_mobile(ss);
   auto res_mobile = mc.forward(inputs);
+  ss.seekg(0, ss.beg);
 
   // check if the methods names are always the same
   // by reloading the script module and saving it back as mobile
@@ -788,7 +789,7 @@ TEST(
   c._save_for_mobile(ss, ExtraFilesMap(), true);
   auto c_loaded = _load_for_mobile(ss);
   /*
-   * Erro stack trace will look like this:
+   * Error stack trace will look like this:
    * Module hierarchy:top(C).A0(backend_with_compiler_demoLoweredModule).AA0(AA)
    * Traceback of TorchScript (most recent call last):
    *  File "<string>", line 3, in FunctionName_UNKNOWN

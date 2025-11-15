@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <test/cpp/jit/test_utils.h>
+#include <torch/torch.h>
 #include <torch/csrc/jit/api/module.h>
 #include <torch/csrc/jit/frontend/resolver.h>
 #include <torch/csrc/jit/mobile/import.h>
@@ -59,10 +60,10 @@ namespace jit {
 namespace mobile {
 // covers int[], ScalarType?, Layout?, Device?, bool?
 TEST(LiteInterpreterTest, Ones) {
-  // Load check in model: ones.ptl
-  auto testModelFile = "ones.ptl";
+  // Load check in model: ModelWithDTypeDeviceLayoutPinMemory.ptl
+  auto testModelFile = "ModelWithDTypeDeviceLayoutPinMemory.ptl";
 
-  //  class Model(torch.nn.Module):
+  //  class ModelWithDTypeDeviceLayoutPinMemory(torch.nn.Module):
   //    def forward(self, x: int):
   //        a = torch.ones([3, x], dtype=torch.int64, layout=torch.strided, device="cpu")
   //        return a
@@ -74,10 +75,10 @@ TEST(LiteInterpreterTest, Ones) {
 }
 
 TEST(LiteInterpreterTest, Index) {
-  // Load check in model: index.ptl
-  auto testModelFile = "index.ptl";
+  // Load check in model: ModelWithTensorOptional.ptl
+  auto testModelFile = "ModelWithTensorOptional.ptl";
 
-  //    class Model(torch.nn.Module):
+  //    class ModelWithTensorOptional(torch.nn.Module):
   //      def forward(self, index):
   //        a = torch.zeros(2, 2)
   //        a[0][1] = 1
@@ -97,10 +98,10 @@ TEST(LiteInterpreterTest, Index) {
 }
 
 TEST(LiteInterpreterTest, Gradient) {
-  // Load check in model: gradient.ptl
-  auto testModelFile = "gradient.ptl";
+  // Load check in model: ModelWithScalarList.ptl
+  auto testModelFile = "ModelWithScalarList.ptl";
 
-  //    class Model(torch.nn.Module):
+  //    class ModelWithScalarList(torch.nn.Module):
   //      def forward(self, a: int):
   //        values = torch.tensor([4., 1., 1., 16.], )
   //        if a == 0:
@@ -119,8 +120,8 @@ TEST(LiteInterpreterTest, Gradient) {
 }
 
 TEST(LiteInterpreterTest, Upsample) {
-  // Load check in model: upsample.ptl
-  auto testModelFile = "upsample.ptl";
+  // Load check in model: ModelWithFloatList.ptl
+  auto testModelFile = "ModelWithFloatList.ptl";
 
   // model = torch.nn.Upsample(scale_factor=(2.0,), mode="linear")
   Module bc = _load_for_mobile(testModelFile);
@@ -131,10 +132,10 @@ TEST(LiteInterpreterTest, Upsample) {
 }
 
 TEST(LiteInterpreterTest, IndexTensor) {
-  // Load check in model: Index_Tensor.ptl
-  auto testModelFile = "index_Tensor.ptl";
+  // Load check in model: ModelWithListOfOptionalTensors.ptl
+  auto testModelFile = "ModelWithListOfOptionalTensors.ptl";
 
-  // class Model(torch.nn.Module):
+  // class ModelWithListOfOptionalTensors(torch.nn.Module):
   //   def forward(self, index):
   //      values = torch.tensor([4., 1., 1., 16.], )
   //      return values[[index, torch.tensor(0)]]
@@ -146,8 +147,8 @@ TEST(LiteInterpreterTest, IndexTensor) {
 }
 
 TEST(LiteInterpreterTest, Conv2d) {
-  // Load check in model: conv2d.ptl
-  auto testModelFile = "conv2d.ptl";
+  // Load check in model: ModelWithArrayOfInt.ptl
+  auto testModelFile = "ModelWithArrayOfInt.ptl";
 
   // model = torch.nn.Conv2d(1, 2, (2, 2), stride=(1, 1), padding=(1, 1))
   Module bc = _load_for_mobile(testModelFile);
@@ -157,10 +158,10 @@ TEST(LiteInterpreterTest, Conv2d) {
 }
 
 TEST(LiteInterpreterTest, AddTensor) {
-  // Load check in model: add_Tensor.ptl
-  auto testModelFile = "add_Tensor.ptl";
+  // Load check in model: ModelWithTensors.ptl
+  auto testModelFile = "ModelWithTensors.ptl";
 
-  //  class Model(torch.nn.Module):
+  //  class ModelWithTensors(torch.nn.Module):
   //    def forward(self, a):
   //      values = torch.ones(size=[2, 3], names=['N', 'C'])
   //      values[0][0] = a[0]
@@ -173,10 +174,10 @@ TEST(LiteInterpreterTest, AddTensor) {
 }
 
 TEST(LiteInterpreterTest, DivideTensor) {
-  // Load check in model: add_Tensor.ptl
-  auto testModelFile = "divide_Tensor.ptl";
+  // Load check in model: ModelWithStringOptional.ptl
+  auto testModelFile = "ModelWithStringOptional.ptl";
 
-  //  class Model(torch.nn.Module):
+  //  class ModelWithStringOptional(torch.nn.Module):
   //    def forward(self, b):
   //      a = torch.tensor(3, dtype=torch.int64)
   //      out = torch.empty(size=[1], dtype=torch.float)
@@ -189,6 +190,30 @@ TEST(LiteInterpreterTest, DivideTensor) {
   at::Tensor expected_2 = at::tensor({-4.}, c10::TensorOptions(c10::ScalarType::Float));
   AT_ASSERT(result_1.toList().get(0).toTensor().equal(expected_1));
   AT_ASSERT(result_1.toList().get(1).toTensor().equal(expected_2));
+}
+
+TEST(LiteInterpreterTest, MultipleOps) {
+  // Load check in model: ModelWithMultipleOps.ptl
+  auto testModelFile = "ModelWithMultipleOps.ptl";
+
+  // class ModelWithMultipleOps(torch.nn.Module):
+  //     def __init__(self) -> None:
+  //         super().__init__()
+  //         self.ops = torch.nn.Sequential(
+  //             torch.nn.ReLU(),
+  //             torch.nn.Flatten(),
+  //         )
+  //
+  //     def forward(self, x):
+  //         x[1] = -2
+  //         return self.ops(x)
+
+  Module bc = _load_for_mobile(testModelFile);
+  auto b = at::ones({2, 2, 2, 2});
+  const auto result = bc.forward({b});
+
+  at::Tensor expected = torch::tensor({{1, 1, 1, 1, 1, 1, 1, 1}, {0, 0, 0, 0, 0, 0, 0, 0}}, c10::TensorOptions(c10::ScalarType::Float));
+  AT_ASSERT(result.toTensor().equal(expected));
 }
 } // namespace mobile
 } // namespace jit
