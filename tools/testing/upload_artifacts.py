@@ -6,7 +6,7 @@ import time
 import zipfile
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from filelock import FileLock, Timeout
 
@@ -41,13 +41,11 @@ def concated_logs() -> str:
     for log_file in glob.glob(
         f"{REPO_ROOT}/test/test-reports/**/*.log", recursive=True
     ):
-        # pyrefly: ignore [bad-argument-type]
         logs.append(f"=== {log_file} ===")
         with open(log_file) as f:
             # For every line, prefix with fake timestamp for log classifier
             for line in f:
                 line = line.rstrip("\n")  # Remove any trailing newline
-                # pyrefly: ignore [bad-argument-type]
                 logs.append(f"2020-01-01T00:00:00.0000000Z {line}")
     return "\n".join(logs)
 
@@ -131,7 +129,7 @@ def trigger_upload_test_stats_intermediate_workflow() -> None:
     # The GITHUB_TOKEN cannot trigger workflow so this isn't used for now
     print("Triggering upload_test_stats_intermediate workflow")
     x = requests.post(
-        "https://api.github.com/repos/pytorch/pytorch/actions/workflows/upload_test_stats_intermediate.yml/dispatches",  # noqa: B950 @lint-ignore
+        "https://api.github.com/repos/pytorch/pytorch/actions/workflows/upload_test_stats_intermediate.yml/dispatches",
         headers={
             "Accept": "application/vnd.github.v3+json",
             "Authorization": f"Bearer {os.environ.get('GITHUB_TOKEN')}",
@@ -154,7 +152,7 @@ def parse_xml_and_upload_json() -> None:
     uploading the same file from multiple processes.
     """
     try:
-        job_id: Optional[int] = int(os.environ.get("JOB_ID", 0))
+        job_id: int | None = int(os.environ.get("JOB_ID", 0))
         if job_id == 0:
             job_id = None
     except (ValueError, TypeError):

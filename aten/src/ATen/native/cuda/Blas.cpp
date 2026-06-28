@@ -6,13 +6,12 @@
 #include <c10/core/ScalarType.h>
 #define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/core/Tensor.h>
-#include <ATen/core/NamedTensor.h>
 #include <ATen/Dispatch.h>
 #include <ATen/ExpandUtils.h>
 #include <ATen/OpMathType.h>
 #include <ATen/TensorUtils.h>
 #include <ATen/cuda/CUDABlas.h>
-#include <ATen/cuda/CUDAScaledBlas.h>
+#include <ATen/native/ScaledBlasUtils.h>
 #include <ATen/cuda/tunable/Tunable.h>
 #include <ATen/cuda/tunable/TunableGemm.h>
 #include <ATen/native/Resize.h>
@@ -24,8 +23,8 @@
 #include <ATen/native/cuda/GroupMM.h>
 #include <ATen/ceil_div.h>
 
-#ifdef USE_FBGEMM_GENAI
-#include <fbgemm_gpu/torch_ops.h>
+#ifdef USE_MSLK
+#include <mslk/gemm/gemm_torch.h>
 #endif
 
 #ifndef AT_PER_OPERATOR_HEADERS
@@ -34,6 +33,7 @@
 #else
 #include <ATen/ops/_addmm_activation_native.h>
 #include <ATen/ops/_efficientzerotensor.h>
+#include <ATen/ops/_int_mm_native.h>
 #include <ATen/ops/_scaled_mm_native.h>
 #include <ATen/ops/_unsafe_view_native.h>
 #include <ATen/ops/abs.h>
@@ -108,8 +108,7 @@ cuda::blas::GEMMAndBiasActivationEpilogue activation_to_gemm_and_blas_arg(Activa
     case Activation::GELU:
       return cuda::blas::GEMMAndBiasActivationEpilogue::GELU;
     default:
-      TORCH_CHECK(false);
-      return cuda::blas::GEMMAndBiasActivationEpilogue::None;
+      TORCH_CHECK(false, "Unknown activation epologue type");
   }
 }
 
@@ -118,32 +117,40 @@ cuda::blas::GEMMAndBiasActivationEpilogue activation_to_gemm_and_blas_arg(Activa
  * Additionally, for ROCM we test whether the architecture supports the Lt.
  */
 static bool isGloballyDisabledAddmmCudaLt(const at::Device& device) {
-  // When hipBLASLt is not supported on the architecture, return true
+  /* On ROCM, we have the following order of precedence:
+  - When hipBLASLt is NOT supported on the architecture, return true.
+  - If and only if the environment is set, then return the value that it set to.
+  - If the environment variable is NOT set, treturn a value based on the preferred BLAS backend.
+  */
+  static const auto is_addmm_cuda_lt_disabled = c10::utils::get_env("DISABLE_ADDMM_CUDA_LT");
   #ifdef USE_ROCM
-  static const std::vector<std::string> archs = {
-        "gfx90a", "gfx942",
-    #if ROCM_VERSION >= 60300
-        "gfx1100", "gfx1101", "gfx1200", "gfx1201", "gfx908",
-    #endif
-    #if ROCM_VERSION >= 70000
-        "gfx950", "gfx1150", "gfx1151"
-    #endif
-  };
+  const auto& archs = at::detail::getCUDAHooks().getHipblasltSupportedArchs();
   const auto is_hipblas_lt_arch_supported = at::detail::getCUDAHooks().isGPUArch(archs, device.index());
   if (!is_hipblas_lt_arch_supported) {
     return true;
   }
-  #endif
 
-  // Check whether it is disabled in the env
-  static const auto is_addmm_cuda_lt_disabled = c10::utils::get_env("DISABLE_ADDMM_CUDA_LT");
+  // If environment variable is explicitly set, respect it
+  if (is_addmm_cuda_lt_disabled.has_value()) {
+    return is_addmm_cuda_lt_disabled == "1";
+  }
+
+  // The available BLAS backends on ROCm are: rocBLAS, hipBLASLt, and CK.
+  const auto preferred_backend = at::globalContext().blasPreferredBackend();
+  if (preferred_backend == at::BlasBackend::Cublaslt) {
+    return false;
+  } else {
+    return true;
+  }
+
+  #else
   if (is_addmm_cuda_lt_disabled == "1") {
     return true;
   }
 
   return false;
+  #endif
 }
-
 /*
  * Check whether for the given input we want to enable the Lt interface
  */
@@ -176,13 +183,12 @@ static bool isInputCompliesAddmmCudaLt(
 
   const auto mat1_sizes = mat1.sizes();
   const auto mat2_sizes = mat2.sizes();
-  #if defined(CUDA_VERSION) || defined(USE_ROCM)
   const auto scalar_type = mat1.scalar_type();
   return (beta.toComplexDouble() == 1.0
     // NOTE: row-major result is important when bias is 1D.
     // This is because Lt broadcasts 1D bias over the columns
     // while the aten::addmm API broadcasts it over the rows,
-    // and this is in conjuction with the data preparation
+    // and this is in conjunction with the data preparation
     // procedure that does not transpose arguments with
     // col-major result. For col-major result we need
     // to explicitly transpose the problem so that bias is
@@ -218,38 +224,9 @@ static bool isInputCompliesAddmmCudaLt(
     && ( // some shape/stride restrictions
       // Strangely, if mat2 has only 1 row or column, we get
       // CUBLAS_STATUS_INVALID_VALUE error from cublasLtMatmulAlgoGetHeuristic.
-      // NOTE: extension to mat1 because mat1/mat2 can be swapped based off
-      // their row-/col-majorness.
-      mat1_sizes[0] > 1 && mat1_sizes[1] > 1 &&
       mat2_sizes[0] > 1 && mat2_sizes[1] > 1
-      // The last conditions is to skip 16b transA and non-trans-B having
-      // leading dim >> rows when they are sliced from a large tensor
-      // see fbcode/caffe2/test/test_linalg.py:test_corner_cases_of_cublasltmatmul
-      #if !(defined(CUDA_VERSION) && CUDA_VERSION >= 12010 || defined(USE_ROCM))
-      // Related to avoiding the leading stride >> leading dim problematic case
-      // with 16b dtypes described above. For such dtypes we only allow inputs
-      // which are either row- or col-major (i.e. non-overlapping, compact memory layout).
-      // In that case the leading stride will be equal to the outer dim len.
-      // Why do we catch this case here? The following `prepare_matrix_for_cublas` method
-      // does not modify inputs as long as there is a stride of length 1
-      // and the leading stride is at least max(1, other dim length), so we might
-      // end up with contiguous cols but not rows (i.e. holes between different rows)
-      // and vice versa.
-      && mat2_sizes[0] < 65535 * 32 && mat2_sizes[1] < 65535 * 32
-      && mat1_sizes[0] < 65535 * 32 && mat1_sizes[1] < 65535 * 32
-      && (
-        // filter by dtype
-        (scalar_type != at::ScalarType::Half && scalar_type != at::ScalarType::BFloat16) ||
-        // check mat1/mat2 is row-/col-major
-        (mat1.is_non_overlapping_and_dense() && mat2.is_non_overlapping_and_dense())
-      )
-      #endif
     )
   );
-  #endif
-
-  // no compliance by default
-  return false;
 }
 
 template <typename scalar_t>
@@ -296,7 +273,7 @@ template <typename scalar_t, typename res_scalar_t = scalar_t>
 bool launchGemmAndBiasCublasLt(
     // args contains result which is modified
     cublasCommonArgs& args,
-    const Tensor& self,
+    const std::optional<Tensor>& self,
     const Scalar& alpha,
     Activation activation = Activation::None
 ) {
@@ -304,12 +281,8 @@ bool launchGemmAndBiasCublasLt(
   // or when it can be squeezed to 1D.
   // self_ptr == nullptr implies ignore bias epilogue
   // and use standard gemm-like API.
-  const auto* self_ptr = [&]() -> auto {
-    if (self.dim() == 1 || self.squeeze().dim() == 1) {
-      return self.const_data_ptr<scalar_t>();
-    }
-    return static_cast<const scalar_t*>(nullptr);
-  }();
+  const auto* self_ptr = self.has_value() ? self.value().const_data_ptr<scalar_t>() : static_cast<const scalar_t*>(nullptr);
+
 
   const auto tuning_ctx = at::cuda::tunable::getTuningContext();
   if (tuning_ctx->IsTunableOpEnabled()) {
@@ -392,35 +365,30 @@ Tensor& addmm_out_cuda_impl(Tensor& result, const Tensor& self, const Tensor& ma
   bool disable_addmm_cuda_lt = persistent_disable_addmm_cuda_lt || disable_addmm_cuda_lt_override;
   #ifdef USE_ROCM
   // Conditioned on the device index, which is not persistent
-  disable_addmm_cuda_lt = isGloballyDisabledAddmmCudaLt(self.device()) || disable_addmm_cuda_lt;
+  disable_addmm_cuda_lt = disable_addmm_cuda_lt || isGloballyDisabledAddmmCudaLt(self.device());
   #endif
   // Condition on the input
-  disable_addmm_cuda_lt = !isInputCompliesAddmmCudaLt(result, self, mat1, mat2, beta, alpha, activation) || disable_addmm_cuda_lt;
-  // }
+  disable_addmm_cuda_lt = disable_addmm_cuda_lt || !isInputCompliesAddmmCudaLt(result, self, mat1, mat2, beta, alpha, activation);
 
   at::ScalarType scalar_type = mat1.scalar_type();
   bool is_float_output_with_half_input = (scalar_type == at::ScalarType::Half || scalar_type == at::ScalarType::BFloat16) && result.scalar_type() == at::ScalarType::Float;
+
+  #ifdef USE_ROCM
+  disable_addmm_cuda_lt = disable_addmm_cuda_lt || is_float_output_with_half_input;
+  #endif
+
+  bool use_bias_ptr_lt = (self.dim() == 1) && !disable_addmm_cuda_lt;
+  // for float output with half input cublasLT with bias produces wrong results
+  use_bias_ptr_lt &= !is_float_output_with_half_input;
 
   // Handle result/self shapes
   if (!result.is_same(self)) {
     at::native::resize_output(result, {mat1.sizes()[0], mat2.sizes()[1]});
 
-    // We use bias ptr in the Lt path only when bias is 1D
-    const auto use_bias_ptr_lt = (self.dim() == 1) && !disable_addmm_cuda_lt;
-    const auto self_maybe_expanded = [&]() -> c10::MaybeOwned<Tensor> {
-      if (!use_bias_ptr_lt) {
-        // We do expand self even before
-        // check for beta != 0.0 to make sure that
-        // test_sparse_csr.py::TestSparseCSRCUDA::test_addmm_errors_*
-        // runs green.
-        return expand_size(self, result.sizes(), "addmm");
-      }
-      return c10::MaybeOwned<Tensor>::borrowed(self);
-    }();
-    // We do not copy bias only when we need the bias ptr
+      // We do not copy bias only when we need the bias ptr
     if (beta.toComplexDouble() != 0.0 && !use_bias_ptr_lt) {
       // NOTE: self should broadcast over result
-      at::native::copy_(result, *self_maybe_expanded);
+      at::native::copy_(result, *expand_size(self, result.sizes(), "addmm"));
     }
   }
 
@@ -468,7 +436,7 @@ Tensor& addmm_out_cuda_impl(Tensor& result, const Tensor& self, const Tensor& ma
         scalar_type,
         "addmm_cuda_lt",
         [&] {
-          lt_success = launchGemmAndBiasCublasLt<scalar_t, float>(args, self, alpha, activation);
+          lt_success = launchGemmAndBiasCublasLt<scalar_t, float>(args, use_bias_ptr_lt ? std::make_optional(self) : std::nullopt, alpha, activation);
         }
       );
       #endif
@@ -480,7 +448,7 @@ Tensor& addmm_out_cuda_impl(Tensor& result, const Tensor& self, const Tensor& ma
         scalar_type,
         "addmm_cuda_lt",
         [&] {
-          lt_success = launchGemmAndBiasCublasLt<scalar_t>(args, self, alpha, activation);
+          lt_success = launchGemmAndBiasCublasLt<scalar_t>(args, use_bias_ptr_lt ? std::make_optional(self) : std::nullopt, alpha, activation);
         }
       );
     } // end is_float_output_with_half_input
@@ -681,7 +649,6 @@ TORCH_IMPL_FUNC(mm_out_cuda)(const Tensor& self, const Tensor& mat2, const Tenso
 
 TORCH_IMPL_FUNC(baddbmm_out_cuda)(const Tensor& self, const Tensor& batch1, const Tensor& batch2, const Scalar& beta, const Scalar& alpha, const Tensor& result) {
   {
-    at::NoNamesGuard guard;
     baddbmm_out_cuda_impl(result, self, batch1, batch2, beta, alpha);
   }
 }
@@ -690,7 +657,6 @@ TORCH_IMPL_FUNC(bmm_out_cuda)(const Tensor& batch1, const Tensor& batch2, const 
   Scalar beta(0.0);
   Scalar alpha(1.0);
   {
-    NoNamesGuard guard;
     baddbmm_out_cuda_impl(result, result, batch1, batch2, beta, alpha);
   }
 }
@@ -744,7 +710,6 @@ Tensor dot_cuda(const Tensor& self, const Tensor& other) {
     }
   }
 
-  at::NoNamesGuard guard;
   dot_check(self, other);
 
   const int n = static_cast<int>(self.numel());
@@ -755,11 +720,11 @@ Tensor dot_cuda(const Tensor& self, const Tensor& other) {
     incy = 1;
   }
 
-if (self._is_zerotensor() || other._is_zerotensor()) {
-  return at::_efficientzerotensor({}, self.options());
-}
+  if (self._is_zerotensor() || other._is_zerotensor()) {
+    return at::_efficientzerotensor({}, self.options());
+  }
 
-return AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND2(
+  return AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND2(
       ScalarType::Half, ScalarType::BFloat16,
       self.scalar_type(), "dot",
       [&] {
@@ -795,7 +760,6 @@ Tensor vdot_cuda(const Tensor& self, const Tensor& other) {
     return (dot_cuda(self, other.conj())).conj();
   }
 
-  at::NoNamesGuard guard;
   dot_check(self, other);
 
   if (self._is_zerotensor() || other._is_zerotensor()) {
@@ -901,7 +865,6 @@ Tensor& _int_mm_out_cuda(const Tensor& self, const Tensor& mat2, Tensor& result)
 
   TORCH_CHECK(result.is_contiguous(), "Expected result to be contiguous.");
 
-#if defined(CUDA_VERSION) || defined(USE_ROCM)
   cublasCommonArgs args(self, mat2, result);
 
   at::cuda::blas::int8_gemm(
@@ -920,14 +883,6 @@ Tensor& _int_mm_out_cuda(const Tensor& self, const Tensor& mat2, Tensor& result)
   if (!result.is_same(*args.result)) {
     result.copy_(*args.result);
   }
-#else
-#if !defined(USE_ROCM) && defined(CUDA_VERSION)
-  TORCH_CHECK(false, "_int_mm_out_cuda not compiled for CUDA ", CUDA_VERSION);
-#else
-  TORCH_CHECK(false, "_int_mm_out_cuda not compiled for this platform.");
-#endif
-#endif
-
   return result;
 }
 
@@ -936,7 +891,7 @@ Tensor _int_mm_cuda(const Tensor& self, const Tensor& mat2) {
   return _int_mm_out_cuda(self, mat2, result);
 }
 
-static void baddbmm_bmm_out_dtype_checks(const Tensor& batch1, const Tensor& batch2, const Scalar& beta, const Scalar& alpha, const at::ScalarType out_dtype, bool is_bmm, const std::optional<Tensor>& self_baddbmm = std::nullopt) {
+static void baddbmm_bmm_out_dtype_checks(const Tensor& batch1, const Tensor& batch2, const Scalar& beta, const Scalar& alpha, const at::ScalarType out_dtype, const std::optional<Tensor>& self_baddbmm = std::nullopt) {
   // ref ATen/native/LinearAlgebra.cpp common_checks_baddbmm_bmm
   TORCH_CHECK(batch1.dim() == 3, "batch1 must be a 3D tensor");
   TORCH_CHECK(batch2.dim() == 3, "batch2 must be a 3D tensor");
@@ -960,7 +915,7 @@ static void baddbmm_bmm_out_dtype_checks(const Tensor& batch1, const Tensor& bat
     (out_dtype == at::ScalarType::Float && (batch1.scalar_type() == at::ScalarType::Half || batch1.scalar_type() == at::ScalarType::BFloat16)),
     "out_dtype must be the same as input dtype or fp32 for fp16/bf16 inputs");
 
-  if (!is_bmm && self_baddbmm.has_value()) {
+  if (self_baddbmm.has_value()) {
     const auto& self = self_baddbmm.value();
     TORCH_CHECK(self.dim() == 3, "self must be a 3D tensor");
     TORCH_CHECK(self.sizes() == output_size, "self must have the same shape as the output");
@@ -968,19 +923,15 @@ static void baddbmm_bmm_out_dtype_checks(const Tensor& batch1, const Tensor& bat
 }
 
 Tensor _bmm_dtype_cuda(const Tensor& batch1, const Tensor& batch2, const at::ScalarType out_dtype) {
-  IntArrayRef batch1_sizes = batch1.sizes();
-  IntArrayRef batch2_sizes = batch2.sizes();
-
-  Tensor out = at::empty({batch1_sizes[0], batch1_sizes[1], batch2_sizes[2]}, batch1.options().dtype(out_dtype));
+  Tensor out = at::empty({batch1.size(0), batch1.size(1), batch2.size(2)}, batch1.options().dtype(out_dtype));
   return _bmm_out_dtype_cuda(batch1, batch2, out_dtype, out);
 }
 
 Tensor& _bmm_out_dtype_cuda(const Tensor& batch1, const Tensor& batch2, const at::ScalarType out_dtype, Tensor &out) {
-  baddbmm_bmm_out_dtype_checks(batch1, batch2, 0.0, 1.0, out_dtype, true);
+  baddbmm_bmm_out_dtype_checks(batch1, batch2, 0.0, 1.0, out_dtype);
   Scalar beta(0.0);
   Scalar alpha(1.0);
   {
-    NoNamesGuard guard;
     baddbmm_out_cuda_impl(out, out, batch1, batch2, beta, alpha);
   }
 
@@ -988,16 +939,17 @@ Tensor& _bmm_out_dtype_cuda(const Tensor& batch1, const Tensor& batch2, const at
 }
 
 Tensor _baddbmm_dtype_cuda(const Tensor& self, const Tensor& batch1, const Tensor& batch2, const at::ScalarType out_dtype, const Scalar& beta, const Scalar& alpha) {
-  // We need to copy the tensor
-  Tensor out = self.clone().to(self.options().dtype(out_dtype));
-
-  return _baddbmm_out_dtype_cuda(out, batch1, batch2, out_dtype, beta, alpha, out);
+  TORCH_CHECK(self.scalar_type() == out_dtype || self.scalar_type() == batch1.dtype(),
+  "self dtype must match either out_dtype or batch1 dtype");
+  Tensor out = at::empty({batch1.size(0), batch1.size(1), batch2.size(2)}, batch1.options().dtype(out_dtype));
+  return _baddbmm_out_dtype_cuda(self, batch1, batch2, out_dtype, beta, alpha, out);
 }
 
 Tensor& _baddbmm_out_dtype_cuda(const Tensor& self, const Tensor& batch1, const Tensor& batch2, const at::ScalarType out_dtype, const Scalar& beta, const Scalar& alpha, Tensor &out) {
-  baddbmm_bmm_out_dtype_checks(batch1, batch2, beta, alpha, out_dtype, false, self);
+  baddbmm_bmm_out_dtype_checks(batch1, batch2, beta, alpha, out_dtype, out);
+  // We need to copy the tensor
+  out.copy_(self);
   {
-    NoNamesGuard guard;
     baddbmm_out_cuda_impl(out, out, batch1, batch2, beta, alpha);
   }
 
@@ -1030,24 +982,27 @@ Tensor& _mm_dtype_out_cuda(const Tensor& self, const Tensor& mat2, const at::Sca
 }
 
 Tensor _addmm_dtype_cuda(const Tensor& self, const Tensor& mat1, const Tensor& mat2, const at::ScalarType out_dtype, const Scalar& beta, const Scalar& alpha) {
-  Tensor result = at::empty(self.sizes(), self.options().dtype(out_dtype));
+  TORCH_CHECK(mat1.dim() == 2, "mat1 must be a matrix, got ", mat1.dim(), "-D tensor");
+  TORCH_CHECK(mat2.dim() == 2, "mat2 must be a matrix, got ", mat2.dim(), "-D tensor");
+  Tensor result = at::empty({mat1.size(0), mat2.size(1)}, self.options().dtype(out_dtype));
   return _addmm_dtype_out_cuda(self, mat1, mat2, out_dtype, beta, alpha, result);
 }
 
 Tensor& _addmm_dtype_out_cuda(const Tensor& self, const Tensor& mat1, const Tensor& mat2, const at::ScalarType out_dtype, const Scalar& beta, const Scalar& alpha, Tensor &out) {
-  TORCH_CHECK(self.scalar_type() == mat2.scalar_type(), "self and mat2 must have the same dtype, but got ", self.scalar_type(), " and ", mat2.scalar_type());
-  TORCH_CHECK(mat1.scalar_type() == mat2.scalar_type(), "mat1 and mat2 must have the same dtype, but got ", mat1.scalar_type(), " and ", mat2.scalar_type());
+// repeat dimensionality checks for direct calls to `out` overload
   TORCH_CHECK(mat1.dim() == 2, "mat1 must be a matrix, got ", mat1.dim(), "-D tensor");
   TORCH_CHECK(mat2.dim() == 2, "mat2 must be a matrix, got ", mat2.dim(), "-D tensor");
   TORCH_CHECK(
       mat1.sizes()[1] == mat2.sizes()[0], "mat1 and mat2 shapes cannot be multiplied (",
       mat1.sizes()[0], "x", mat1.sizes()[1], " and ", mat2.sizes()[0], "x", mat2.sizes()[1], ")");
+  TORCH_CHECK(mat1.scalar_type() == mat2.scalar_type(), "mat1 and mat2 must have the same dtype, but got ", mat1.scalar_type(), " and ", mat2.scalar_type());
+  TORCH_CHECK(out_dtype == mat1.scalar_type() ||
+  (out_dtype == at::ScalarType::Float && (mat1.scalar_type() == at::ScalarType::Half || mat1.scalar_type() == at::ScalarType::BFloat16)),
+  "out_dtype must be the same as input dtype or fp32 for fp16/bf16 inputs");
 
   TORCH_CHECK(out_dtype == out.scalar_type(), "out_dtype must be the same as the dtype of the provided out tensor");
-  TORCH_CHECK(out_dtype == self.scalar_type() ||
-    (out_dtype == at::ScalarType::Float && (self.scalar_type() == at::ScalarType::Half || self.scalar_type() == at::ScalarType::BFloat16)),
-    "out_dtype must be the same as input dtype or fp32 for fp16/bf16 inputs");
-  TORCH_CHECK(out_dtype == out.scalar_type(), "out_dtype must be the same as the dtype of the provided out tensor");
+  TORCH_CHECK(out_dtype == self.scalar_type() || self.scalar_type() == mat1.scalar_type(),
+    "self dtype must match either out_dtype or mat1 dtype");
 
   addmm_out_cuda_impl(out, self, mat1, mat2, beta, alpha);
 

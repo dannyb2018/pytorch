@@ -4,9 +4,6 @@
 #include <torch/csrc/utils/object_ptr.h>
 #include <torch/csrc/utils/python_strings.h>
 
-#include <c10/core/QScheme.h>
-
-#include <structmember.h>
 #include <cstring>
 #include <string>
 
@@ -80,13 +77,7 @@ PyTypeObject THPQSchemeType = {
 };
 
 void THPQScheme_init(PyObject* module) {
-  if (PyType_Ready(&THPQSchemeType) < 0) {
-    throw python_error();
-  }
-  Py_INCREF(&THPQSchemeType);
-  if (PyModule_AddObject(
-          module, "qscheme", reinterpret_cast<PyObject*>(&THPQSchemeType)) !=
-      0) {
+  if (PyModule_AddType(module, &THPQSchemeType) < 0) {
     throw python_error();
   }
 }

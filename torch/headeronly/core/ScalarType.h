@@ -146,7 +146,8 @@ struct dummy_int1_7_t {};
   _(c10::dummy_int1_7_t<6>, Int6) /* 42 */               \
   _(c10::dummy_int1_7_t<7>, Int7) /* 43 */               \
   _(c10::Float8_e8m0fnu, Float8_e8m0fnu) /* 44 */        \
-  _(c10::Float4_e2m1fn_x2, Float4_e2m1fn_x2) /* 45 */
+  _(c10::Float4_e2m1fn_x2, Float4_e2m1fn_x2) /* 45 */    \
+  _(c10::complex<c10::BFloat16>, BComplex32) /* 46 */
 
 // NB: despite its generic sounding name, the macros that don't take _AND
 // are mostly only used by tensorexpr
@@ -336,6 +337,13 @@ inline std::ostream& operator<<(
   return stream << toString(scalar_type);
 }
 
+inline bool isQIntType(ScalarType t) {
+  // Don't forget to extend this when adding new QInt types
+  return t == ScalarType::QInt8 || t == ScalarType::QUInt8 ||
+      t == ScalarType::QInt32 || t == ScalarType::QUInt4x2 ||
+      t == ScalarType::QUInt2x4;
+}
+
 inline ScalarType toUnderlying(ScalarType t) {
   switch (t) {
     case ScalarType::QUInt8:
@@ -362,6 +370,7 @@ using c10::NumScalarTypes;
 using c10::ScalarType;
 using c10::toString;
 using c10::operator<<;
+using c10::isQIntType;
 using c10::toUnderlying;
 
 namespace impl {

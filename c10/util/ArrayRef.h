@@ -50,7 +50,13 @@ namespace c10 {
 /// However, you should prefer to use ArrayRef when possible, because its use
 /// of TORCH_CHECK will lead to better user-facing error messages.
 template <typename T>
-class ArrayRef final : public HeaderOnlyArrayRef<T> {
+// ArrayRef cannot be derived from. Normally, we would use `final`
+// specifier to force this constraint at compile time.  However, Intel
+// compiler does not recognize ArrayRef as a class template (which is
+// required in the definition of at::TensorAccessor, for instance)
+// when `final` specifier is used. So, we cannot define ArrayRef as
+// final because of the Intel compiler issue.
+class ArrayRef : public HeaderOnlyArrayRef<T> {
  public:
   /// @name Constructors, all inherited from HeaderOnlyArrayRef except for
   /// SmallVector. As inherited constructors won't work with class template
@@ -141,6 +147,7 @@ class ArrayRef final : public HeaderOnlyArrayRef<T> {
   /// The declaration here is extra complicated so that "arrayRef = {}"
   /// continues to select the move assignment operator.
   template <typename U>
+  // NOLINTNEXTLINE(modernize-use-constraints)
   std::enable_if_t<std::is_same_v<U, T>, ArrayRef<T>>& operator=(
       // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward)
       U&& Temporary) = delete;
@@ -150,6 +157,7 @@ class ArrayRef final : public HeaderOnlyArrayRef<T> {
   /// The declaration here is extra complicated so that "arrayRef = {}"
   /// continues to select the move assignment operator.
   template <typename U>
+  // NOLINTNEXTLINE(modernize-use-constraints)
   std::enable_if_t<std::is_same_v<U, T>, ArrayRef<T>>& operator=(
       std::initializer_list<U>) = delete;
 
@@ -187,6 +195,7 @@ ArrayRef(const std::array<T, N>&) -> ArrayRef<T>;
 
 // C array constructor
 template <typename T, size_t N>
+// NOLINTNEXTLINE(*c-arrays*)
 ArrayRef(const T (&)[N]) -> ArrayRef<T>;
 
 // std::initializer_list constructor
@@ -198,13 +207,13 @@ ArrayRef(const std::initializer_list<T>&) -> ArrayRef<T>;
 template <typename T>
 std::ostream& operator<<(std::ostream& out, ArrayRef<T> list) {
   int i = 0;
-  out << "[";
+  out << '[';
   for (const auto& e : list) {
     if (i++ > 0)
       out << ", ";
     out << e;
   }
-  out << "]";
+  out << ']';
   return out;
 }
 
@@ -270,40 +279,6 @@ template <typename T, size_t N>
 // NOLINTNEXTLINE(*c-arrays*)
 ArrayRef<T> makeArrayRef(const T (&Arr)[N]) {
   return ArrayRef<T>(Arr);
-}
-
-// WARNING: Template instantiation will NOT be willing to do an implicit
-// conversions to get you to an c10::ArrayRef, which is why we need so
-// many overloads.
-
-template <typename T>
-bool operator==(c10::ArrayRef<T> a1, c10::ArrayRef<T> a2) {
-  return a1.equals(a2);
-}
-
-template <typename T>
-bool operator!=(c10::ArrayRef<T> a1, c10::ArrayRef<T> a2) {
-  return !a1.equals(a2);
-}
-
-template <typename T>
-bool operator==(const std::vector<T>& a1, c10::ArrayRef<T> a2) {
-  return c10::ArrayRef<T>(a1).equals(a2);
-}
-
-template <typename T>
-bool operator!=(const std::vector<T>& a1, c10::ArrayRef<T> a2) {
-  return !c10::ArrayRef<T>(a1).equals(a2);
-}
-
-template <typename T>
-bool operator==(c10::ArrayRef<T> a1, const std::vector<T>& a2) {
-  return a1.equals(c10::ArrayRef<T>(a2));
-}
-
-template <typename T>
-bool operator!=(c10::ArrayRef<T> a1, const std::vector<T>& a2) {
-  return !a1.equals(c10::ArrayRef<T>(a2));
 }
 
 using IntArrayRef = ArrayRef<int64_t>;

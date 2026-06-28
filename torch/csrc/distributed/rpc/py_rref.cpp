@@ -11,7 +11,7 @@
 
 namespace torch::distributed::rpc {
 
-/////////////////////  Pickle/Unpickle Helplers ////////////////////////////
+/////////////////////  Pickle/Unpickle Helpers ////////////////////////////
 
 namespace {
 
@@ -110,7 +110,7 @@ TypePtr tryInferTypeWithTypeHint(
   }
 
   // Otherwise it's a pure pyobject, create the RRef
-  // that holds an IValue of an pyobject.
+  // that holds an IValue of a pyobject.
   return PyObjectType::get();
 }
 
@@ -321,7 +321,7 @@ void PyRRef::backwardOwnerRRef(
     py::object obj = torch::jit::toPyObject(value);
     try {
       value = torch::jit::toIValue(obj, c10::TensorType::get());
-    } catch (py::cast_error& e) {
+    } catch (py::cast_error&) {
       TORCH_CHECK(false, "RRef should contain a tensor for .backward()");
     }
   }

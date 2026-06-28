@@ -29,7 +29,11 @@ if TEST_WITH_DEV_DBG_ASAN:
     sys.exit(0)
 
 
-device_type = acc.type if (acc := torch.accelerator.current_accelerator()) else "cpu"
+device_type = (
+    acc.type
+    if (acc := torch.accelerator.current_accelerator(check_available=True))
+    else "cpu"
+)
 
 
 def gpus_for_rank(world_size):
@@ -216,8 +220,9 @@ class DistributedDataParallelCommHookTest(DistributedTestBase):
 
 
 if __name__ == "__main__":
-    assert not torch.cuda._initialized, (
-        "test_distributed must not have initialized CUDA context on main process"
-    )
+    if torch.cuda._initialized:
+        raise AssertionError(
+            "test_distributed must not have initialized CUDA context on main process"
+        )
 
     run_tests()

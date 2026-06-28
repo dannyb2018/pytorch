@@ -440,7 +440,7 @@ std::string InplaceConverter::ValueTracker::toString() const {
     ss << "Value[" << idx << "]: " << it.first->debugName() << '\n';
     ss << "  Mapping to ";
     for (auto v : it.second) {
-      ss << v->debugName() << " ";
+      ss << v->debugName() << ' ';
     }
     ss << '\n';
     idx++;
@@ -452,7 +452,7 @@ std::string InplaceConverter::ValueTracker::toString() const {
     ss << " map to " << it.second->debugName() << '\n';
   }
 
-  return ss.str();
+  return std::move(ss).str();
 }
 
 void InplaceConverter::ValueTracker::recordSetValue(

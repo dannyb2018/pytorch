@@ -14,6 +14,12 @@ aspects of contributing to PyTorch.
   - [Tips and Debugging](#tips-and-debugging)
 - [Nightly Checkout & Pull](#nightly-checkout--pull)
 - [Codebase structure](#codebase-structure)
+- [AI-Assisted Development](#ai-assisted-development)
+- [Spin](#spin)
+  - [Building](#building)
+  - [Linting](#linting)
+    - [default lint](#default-lint)
+  - [Regenerating](#regenerating)
 - [Unit testing](#unit-testing)
   - [Python Unit Testing](#python-unit-testing)
   - [Better local unit tests with `pytest`](#better-local-unit-tests-with-pytest)
@@ -49,7 +55,7 @@ aspects of contributing to PyTorch.
 - [Windows development tips](#windows-development-tips)
   - [Known MSVC (and MSVC with NVCC) bugs](#known-msvc-and-msvc-with-nvcc-bugs)
   - [Building on legacy code and CUDA](#building-on-legacy-code-and-cuda)
-- [Pre-commit tidy/linting hook](#pre-commit-tidylinting-hook)
+- [Linting before committing](#linting-before-committing)
 - [Building PyTorch with ASAN](#building-pytorch-with-asan)
   - [Getting `ccache` to work](#getting-ccache-to-work)
   - [Why this stuff with `LD_PRELOAD` and `LIBASAN_RT`?](#why-this-stuff-with-ld_preload-and-libasan_rt)
@@ -126,7 +132,7 @@ Follow the instructions for [installing PyTorch from source](https://github.com/
       ```
 
 
-* If you run into issue running `git submodule update --init --recursive`. Please try the following:
+* If you run into an issue running `git submodule update --init --recursive`, please try the following:
   - If you encounter an error such as
     ```
     error: Submodule 'third_party/pybind11' could not be updated
@@ -138,8 +144,8 @@ Follow the instructions for [installing PyTorch from source](https://github.com/
     ```
     fatal: unable to access 'https://github.com/pybind/pybind11.git': could not load PEM client certificate ...
     ```
-    this is likely that you are using HTTP proxying and the certificate expired. To check if the certificate is valid, run
-    `git config --global --list` and search for config like `http.proxysslcert=<cert_file>`. Then check certificate valid date by running
+    it is likely that you are using HTTP proxying and the certificate expired. To check if the certificate is valid, run
+    `git config --global --list` and search for config like `http.proxysslcert=<cert_file>`. Then check certificate validity dates by running
     ```bash
     openssl x509 -noout -in <cert_file> -dates
     ```
@@ -263,7 +269,6 @@ dependencies as well as the nightly binaries into the repo directory.
   * [cpp](test/cpp) - C++ unit tests for PyTorch C++ frontend.
     * [api](test/cpp/api) - [README](test/cpp/api/README.md)
     * [jit](test/cpp/jit) - [README](test/cpp/jit/README.md)
-    * [tensorexpr](test/cpp/tensorexpr) - [README](test/cpp/tensorexpr/README.md)
   * [expect](test/expect) - Automatically generated "expect" files
     which are used to compare against expected output.
   * [onnx](test/onnx) - Tests for ONNX export functionality,
@@ -272,7 +277,77 @@ dependencies as well as the nightly binaries into the repo directory.
   * [core](caffe2/core) - Core files of Caffe2, e.g., tensor, workspace,
     blobs, etc.
   * ...
-* [.circleci](.circleci) - CircleCI configuration management. [README](.circleci/README.md)
+
+## AI-Assisted Development
+
+PyTorch is a project developed and reviewed by humans.
+PyTorch encourages the use of AI in its development, however, PyTorch is a large and technically complex project and it is easy for current LLMs,
+if not properly guided, to produce seemingly correct PRs or issues with major flaws. Because of this, to ensure the health
+of the project, we must limit how contributors, especially those new to the project,
+submit PRs and open issues.
+
+All the details on how to contribute (with or without AI assistance) are in the [Ultimate Guide to PyTorch Contributions](https://github.com/pytorch/pytorch/wiki/The-Ultimate-Guide-to-PyTorch-Contributions).
+A couple reminders here though:
+
+- **You are personally responsible for what you send**: If the comments, issues or PRs you send are low quality or consistently overly verbose compared to what is expected, your contributions will not be accepted anymore. You are responsible for reviewing, ensuring the accuracy and the quality of everything you send.
+- **PRs must have an associated "actionable" Issue**: Generally, as a new contributor, you should never send a PR that doesn't have a corresponding issue with the "actionable" label. If you just opened the issue, you must wait for a maintainer to review it and mark it actionable before preparing and sending a PR for it.
+- **New features, utility functions, or core extensions**: Create a short and to the point issue about the problem you're encountering. You should NEVER include AI-generated explanation of how to solve the problem (this will be discussed later once it's decided the feature should be implemented).
+
+## Spin
+
+[Spin](https://github.com/scientific-python/spin) is a developer cli tool that
+helps running common tasks.
+You can either install it in your dev environment with `pip install spin` or as a global uv tool in your system with `uv tool install spin --with=packaging,pyyaml,typing_extensions`.
+
+To list the available tasks, run `spin --help`.
+Currently, we support the following tasks with Spin:
+
+### Building
+
+To support building and general development, the following commands exist.
+Both `develop` and `install` prefer `uv pip` when available and fall back to
+regular pip. Build configuration comes from the environment as usual, e.g.
+`BUILD_CONFIG spin develop`.
+
+|command||
+|-|-|
+|`develop` / `editable`|editable install (also known as develop or `-e` install)|
+|`install`|non-editable install|
+|`clean`|clean, that is remove files and directories listed in .gitignore before the NOT-CLEAN-FILES marker|
+
+### Linting
+
+Spin helps with linting by making sure that lintrunner is installed correctly
+and by isolating the lintrunner environment from the general development
+environment using uv.
+You can pass additional arguments to lintrunner by adding them after a
+separating double dash (`--`), for example `spin quicklint -- --take CLANGTIDY`.
+
+|command||
+|-|-|
+|`lint`|perform default lint (see below)|
+|`quicklint`|perform lint on all files changed in the latest commit and the working directory|
+|`quickfix`|autofix issues on all files changed in the latest commit and the working directory|
+
+#### default lint
+
+Since some linters take a long time to run, we categorize all linters as either
+fast or slow. In the default lint, only the fast linters are run on all files;
+the slow linters are run on the changed files only.
+
+### Regenerating
+
+PyTorch makes use of a number of code generations, which range from the version
+information in `torch/version.py` over type stubs and other linter support to
+github workflows.
+With Spin, we offer a unified interface to these tasks.
+
+|command||
+|-|-|
+|`regenerate-version`|regenerate `torch/version.py`|
+|`regenerate-type-stubs`|regenerates type stubs for use by static type checkers|
+|`regenerate-clangtidy-files`|regenerates clang related files needed for linting|
+|`regenerate-github-workflows`|regenerates github workflows from jinja templates|
 
 ## Unit testing
 
@@ -402,10 +477,10 @@ You can generate a commit that limits the CI to only run a specific job by using
 `tools/testing/explicit_ci_jobs.py` like so:
 
 ```bash
-# --job: specify one or more times to filter to a specific job + its dependencies
-# --filter-gha: specify github actions workflows to keep
-# --make-commit: commit CI changes to git with a message explaining the change
-python tools/testing/explicit_ci_jobs.py --job binary_linux_manywheel_3_6m_cpu_devtoolset7_nightly_test --filter-gha '*generated*gcc5.4*' --make-commit
+# --filter-gha: keep only the github actions workflow files matching this glob
+#               (all other workflow files are deleted)
+# --make-commit: commit the CI changes to git with a message explaining the change
+python tools/testing/explicit_ci_jobs.py --filter-gha '*pull*' --make-commit
 
 # Make your changes
 
@@ -500,9 +575,9 @@ pip install -r requirements.txt
 ```
 > Note: if you installed `nodejs` with a different package manager then `npm` will probably install a version of `katex` that is not
 compatible with your version of `nodejs` and doc builds will fail.
-A combination of versions that is known to work is `node@6.13.1` and
-`katex@0.13.18`. To install the latter with `npm` you can run
-```npm install -g katex@0.13.18```
+A combination of versions that is known to work is `node@22` (current LTS) and
+`katex@0.16.10`. To install the latter with `npm` you can run
+```npm install -g katex@0.16.10```
 
 
 > Note that if you are a Facebook employee using a devserver, yarn may be more convenient to install katex:
@@ -510,7 +585,7 @@ A combination of versions that is known to work is `node@6.13.1` and
 ```bash
 yarn global add katex
 ```
-> If a specific version is required you can use for example `yarn global add katex@0.13.18`.
+> If a specific version is required you can use for example `yarn global add katex@0.16.10`.
 
 3. Generate the documentation HTML files. The generated files will be in `docs/build/html`.
 
@@ -548,7 +623,7 @@ For C++ documentation (https://pytorch.org/cppdocs), we use
 reference](https://www.doxygen.nl/manual/) for more
 information on the documentation syntax.
 
-We run Doxygen in CI (Travis) to verify that you do not use invalid Doxygen
+We run Doxygen in CI to verify that you do not use invalid Doxygen
 commands. To run this check locally, run `./check-doxygen.sh` from inside
 `docs/cpp/source`.
 
@@ -744,7 +819,7 @@ with `pip install ninja`.  If PyTorch was already built, you will need
 to run `python setup.py clean` once after installing ninja for builds to
 succeed.
 
-Note: Make sure to use a machine with a larger number of CPU cores, this will significantly reduce your build times.
+Note: Make sure to use a machine with a larger number of CPU cores;this will significantly reduce your build times.
 
 #### Use CCache
 
@@ -752,7 +827,7 @@ Even when dependencies are tracked with file modification, there are many
 situations where files get rebuilt when a previous compilation was exactly the
 same. Using ccache in a situation like this is a real time-saver.
 
-Before building pytorch, install ccache from your package manager of choice:
+Before building PyTorch, install ccache from your package manager of choice:
 
 ```bash
 sudo apt install ccache
@@ -771,7 +846,7 @@ ccache -M 25Gi  # -M 0 for unlimited
 ccache -F 0
 ```
 
-To check this is working, do two clean builds of pytorch in a row. The second
+To check this is working, do two clean builds of PyTorch in a row. The second
 build should be substantially and noticeably faster than the first build. If
 this doesn't seem to be the case, check the `CMAKE_<LANG>_COMPILER_LAUNCHER`
 rules in `build/CMakeCache.txt`, where `<LANG>` is `C`, `CXX` and `CUDA`.
@@ -820,8 +895,8 @@ This adds a build step where the compiler takes `<ATen/ATen.h>` and essentially
 dumps its internal AST to a file so the compiler can avoid repeating itself for
 every `.cpp` file.
 
-One caveat is that when enabled, this header gets included in every file by default.
-Which may change what code is legal, for example:
+One caveat is that when enabled, this header gets included in every file by default,
+which may change what code is legal, for example:
 - internal functions can never alias existing names in `<ATen/ATen.h>`
 - names in `<ATen/ATen.h>` will work even if you don't explicitly include it.
 
@@ -841,11 +916,11 @@ python -m pip install --no-build-isolation -v -e .
 
 ### Rebuild few files with debug information
 
-While debugging a problem one often had to maintain a debug build in a separate folder.
-But often only a few files needs to be rebuild with debug info to get a symbolicated backtrace or enable source debugging
+While debugging a problem, one often has to maintain a debug build in a separate folder.
+But often only a few files need to be rebuilt with debug info to get a symbolicated backtrace or enable source debugging.
 One can easily solve this with the help of `tools/build_with_debinfo.py`
 
-For example, suppose one wants to debug what is going on while tensor index is selected, which can be achieved by setting a breakpoint at `applySelect` function:
+For example, suppose one wants to debug what is going on while a tensor index is selected, which can be achieved by setting a breakpoint at `applySelect` function:
 ```
 % lldb -o "b applySelect" -o "process launch" -- python3 -c "import torch;print(torch.rand(5)[3])"
 (lldb) target create "python"
@@ -867,7 +942,7 @@ libtorch_python.dylib`at::indexing::impl::applySelect:
 Target 0: (python) stopped.
 Process 87729 launched: '/usr/bin/python' (arm64)
 ```
-Which is not very informative, but can be easily remedied by rebuilding `python_variable_indexing.cpp` with debug information
+This is not very informative, but can be easily remedied by rebuilding `python_variable_indexing.cpp` with debug information.
 ```
 % ./tools/build_with_debinfo.py torch/csrc/autograd/python_variable_indexing.cpp
 [1 / 2] Building caffe2/torch/CMakeFiles/torch_python.dir/csrc/autograd/python_variable_indexing.cpp.o
@@ -897,7 +972,7 @@ Process 87741 stopped
 Target 0: (python) stopped.
 Process 87741 launched: '/usr/bin/python3' (arm64)
 ```
-Which is much more useful, isn't it?
+This is much more useful, isn't it?
 
 ### C++ frontend development tips
 
@@ -911,10 +986,10 @@ Please follow the lead of the other tests to see how to write a new test case.
 
 ### GDB integration
 
-If you are debugging pytorch inside GDB, you might be interested in
+If you are debugging PyTorch inside GDB, you might be interested in
 [pytorch-gdb](tools/gdb/pytorch-gdb.py). This script introduces some
-pytorch-specific commands which you can use from the GDB prompt. In
-particular, `torch-tensor-repr` prints a human-readable repr of an at::Tensor
+PyTorch-specific commands which you can use from the GDB prompt. In
+particular, `torch-tensor-repr` prints a human-readable representation of an at::Tensor
 object. Example of usage:
 
 ```
@@ -948,7 +1023,7 @@ tensor([1., 2., 3., 4.], dtype=torch.float64)
 ```
 
 GDB tries to automatically load `pytorch-gdb` thanks to the
-[.gdbinit](.gdbinit) at the root of the pytorch repo. However, auto-loadings is disabled by default, because of security reasons:
+[.gdbinit](.gdbinit) at the root of the PyTorch repository. However, auto-loading is disabled by default, because of security reasons:
 
 ```bash
 $ gdb
@@ -983,15 +1058,15 @@ If you are working on the CUDA code, here are some useful CUDA debugging tips:
 1. `CUDA_DEVICE_DEBUG=1` will enable CUDA device function debug symbols (`-g -G`).
     This will be particularly helpful in debugging device code. However, it will
     slow down the build process for about 50% (compared to only `DEBUG=1`), so use wisely.
-2. `cuda-gdb` and `cuda-memcheck` are your best CUDA debugging friends. Unlike`gdb`,
+2. `cuda-gdb` and `compute-sanitizer` are your best CUDA debugging friends. Unlike`gdb`,
    `cuda-gdb` can display actual values in a CUDA tensor (rather than all zeros).
-3. CUDA supports a lot of C++11/14 features such as, `std::numeric_limits`, `std::nextafter`,
-   `std::tuple` etc. in device code. Many of such features are possible because of the
+3. CUDA supports a lot of C++17/20 features, which include `std::numeric_limits`, `std::nextafter`,
+   `if constexpr` etc. in device code. Many of such features are possible because of the
    [--expt-relaxed-constexpr](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#constexpr-functions)
    nvcc flag. There is a known [issue](https://github.com/ROCm/hip/issues/374)
-   that ROCm errors out on device code, which uses such stl functions.
+   that ROCm errors out on device code, which uses such STL functions.
 4. A good performance metric for a CUDA kernel is the
-   [Effective Memory Bandwidth](https://devblogs.nvidia.com/how-implement-performance-metrics-cuda-cc/).
+   [Effective Memory Bandwidth](https://developer.nvidia.com/blog/how-implement-performance-metrics-cuda-cc/#effective_bandwidth).
    It is useful for you to measure this metric whenever you are writing/optimizing a CUDA
    kernel. Following script shows how we can measure the effective bandwidth of CUDA `uniform_`
    kernel.
@@ -1055,7 +1130,7 @@ two dynamic libraries, one linking with the other:
 
 ```CMake
 project(myproject CXX)
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 20)
 add_library(foo SHARED foo.cpp)
 add_library(bar SHARED bar.cpp)
 # NB: don't forget to __declspec(dllexport) at least one symbol from foo,
@@ -1112,8 +1187,9 @@ static_assert(std::is_same(A*, decltype(A::singleton()))::value, "hmm");
 ```
 
 * The compiler will run out of heap space if you attempt to compile files that
-  are too large. Splitting such files into separate files helps.
-  (Example: `THTensorMath`, `THTensorMoreMath`, `THTensorEvenMoreMath`.)
+  are too large. Splitting such files into separate files helps. This is why
+  the codegen shards large generated files (e.g. `VariableType.cpp` and
+  `RegisterCPU.cpp`); see Note [Sharded File] for details.
 
 * MSVC's preprocessor (but not the standard compiler) has a bug
   where it incorrectly tokenizes raw string literals, ending when it sees a `"`.
@@ -1127,35 +1203,29 @@ static_assert(std::is_same(A*, decltype(A::singleton()))::value, "hmm");
 
 ### Building on legacy code and CUDA
 
-CUDA, MSVC, and PyTorch versions are interdependent; please install matching versions from this table:
-| CUDA version | Newest supported VS version                             | PyTorch version |
-| ------------ | ------------------------------------------------------- | --------------- |
-| 10.1         | Visual Studio 2019 (16.X) (`_MSC_VER` < 1930)           |  1.3.0 ~ 1.7.0  |
-| 10.2         | Visual Studio 2019 (16.X) (`_MSC_VER` < 1930)           |  1.5.0 ~ 1.7.0  |
-| 11.0         | Visual Studio 2019 (16.X) (`_MSC_VER` < 1930)           |      1.7.0      |
+CUDA, MSVC, and PyTorch versions are interdependent; please install matching versions. Current
+PyTorch requires CUDA 12.8+ and Visual Studio 2022 (17.X). Building PyTorch requires a C++20
+capable toolchain (GCC 11.3+, Clang 16+, or MSVC 2022).
 
-Note: There's a [compilation issue](https://github.com/uxlfoundation/oneDNN/issues/812) in several Visual Studio 2019 versions since 16.7.1, so please make sure your Visual Studio 2019 version is not in 16.7.1 ~ 16.7.5
+## Linting before committing
 
-## Pre-commit tidy/linting hook
-
-We use clang-tidy to perform additional
-formatting and semantic checking of code. We provide a pre-commit git hook for
-performing these checks, before a commit is created:
+All linting (clang-tidy, flake8, formatting, and more) is run through
+[`lintrunner`](https://github.com/pytorch/pytorch/wiki/lintrunner). The
+easiest way to run it is via `spin`:
 
   ```bash
-  ln -s ../../tools/git-pre-commit .git/hooks/pre-commit
+  spin lint        # run the default lint
+  spin quicklint   # lint only files changed in the latest commit and working tree
+  spin quickfix    # autofix issues on those changed files
   ```
 
-If you have already committed files and
-CI reports `flake8` errors, you can run the check locally in your PR branch with:
+You can also invoke `lintrunner` directly. With no arguments it lints the files
+changed relative to the merge-base, so just run:
 
   ```bash
-  flake8 $(git diff --name-only $(git merge-base --fork-point main))
+  lintrunner          # lint changed files
+  lintrunner -a       # lint changed files and apply autofixes
   ```
-
-You'll need to install an appropriately configured flake8; see
-[Lint as you type](https://github.com/pytorch/pytorch/wiki/Lint-as-you-type)
-for documentation on how to do this.
 
 Fix the code so that no errors are reported when you re-run the above check again,
 and then commit the fix.
@@ -1166,8 +1236,8 @@ and then commit the fix.
 useful for debugging memory errors in C++. We run it in CI, but here's how to
 get the same thing to run on your local machine.
 
-First, install LLVM 8. The easiest way is to get [prebuilt
-binaries](http://releases.llvm.org/download.html#8.0.0) and extract them to
+First, install LLVM (our ASAN CI currently uses clang 18). The easiest way is to get [prebuilt
+binaries](https://releases.llvm.org/download.html) and extract them to a
 folder (later called `$LLVM_ROOT`).
 
 Then set up the appropriate scripts. You can put this in your `.bashrc`:
@@ -1176,7 +1246,7 @@ Then set up the appropriate scripts. You can put this in your `.bashrc`:
 LLVM_ROOT=<wherever your llvm install is>
 PYTORCH_ROOT=<wherever your pytorch checkout is>
 
-LIBASAN_RT="$LLVM_ROOT/lib/clang/8.0.0/lib/linux/libclang_rt.asan-x86_64.so"
+LIBASAN_RT="$LLVM_ROOT/lib/clang/18/lib/linux/libclang_rt.asan-x86_64.so"
 build_with_asan()
 {
   LD_PRELOAD=${LIBASAN_RT} \
@@ -1244,7 +1314,7 @@ More information can be found
 
 We need `LD_PRELOAD` because there is a cmake check that ensures that a
 simple program builds and runs. If we are building with ASAN as a shared
-library, we need to `LD_PRELOAD` the runtime library, otherwise there will
+library, we need to use `LD_PRELOAD` to load the runtime library, otherwise there will be
 dynamic linker errors and the check will fail.
 
 We don’t actually need either of these if we fix the cmake checks.
@@ -1316,7 +1386,7 @@ There are two possible choices for which commit to use:
 For all practical purposes, most people can think of the commit being used as
 commit `B` (choice **1**).
 
-However, if workflow files (which govern CI behavior) were modified (either by your PR or since dev branch were created ) there's
+However, if workflow files (which govern CI behavior) were modified (either by your PR or since dev branch was created) there's
 a nuance to know about:
 The workflow files themselves get taken from checkpoint `C`, the merger of your
 PR and the `main` branch. But only the workflow files get taken from that merged

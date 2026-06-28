@@ -3,7 +3,6 @@
 #include <ATen/MemoryOverlap.h>
 #include <ATen/core/symbol.h>
 #include <ATen/record_function.h>
-#include <c10/core/CPUAllocator.h>
 #include <c10/core/InferenceMode.h>
 #include <c10/macros/Macros.h>
 #include <c10/util/MaybeOwned.h>
@@ -17,16 +16,15 @@
 #include <torch/csrc/jit/passes/eliminate_no_ops.h>
 #include <torch/csrc/jit/passes/freeze_module.h>
 #include <torch/csrc/jit/passes/remove_mutation.h>
-#include <torch/csrc/jit/passes/subgraph_rewrite.h>
 #include <torch/csrc/jit/passes/variadic_ops.h>
 #include <torch/csrc/jit/runtime/graph_iterator.h>
 #include <torch/csrc/jit/runtime/static/fusion.h>
 #include <torch/csrc/jit/runtime/static/memory_planner.h>
 #include <torch/csrc/jit/runtime/static/ops.h>
 #include <torch/csrc/jit/runtime/static/passes.h>
-#include <torch/csrc/jit/runtime/vararg_functions.h>
 #include <algorithm>
 #include <cstdint>
+#include <initializer_list>
 #include <iostream>
 
 #ifndef AT_PER_OPERATOR_HEADERS
@@ -71,6 +69,42 @@ bool allArgsAreTensors(const Node* node) {
 }
 
 } // namespace
+
+#ifdef FBCODE_CAFFE2
+
+C10_DEFINE_REGISTRY(SRNodeExecutorRegistry, NodeExecutorFunctor)
+
+namespace {
+
+static void sequentialExecute(
+    BlockRunner& block_runner,
+    ProcessedNode* nodes,
+    size_t num_nodes,
+    void* /*ctx*/) {
+  for (size_t i = 0; i < num_nodes; ++i) {
+    nodes[i].run();
+    // Check for incorrect schema alias info.
+    block_runner.verify_and_correct_memory_overlap(nodes[i]);
+  }
+}
+
+struct SequentialNodeExecutorFunctor : public NodeExecutorFunctor {
+  NodeExecutorFn Create(
+      const BlockInfo& /*block_info*/,
+      const StaticModuleOptions& /*opts*/,
+      void** /*context*/) override {
+    return &sequentialExecute;
+  }
+};
+
+} // namespace
+
+C10_REGISTER_CLASS(
+    SRNodeExecutorRegistry,
+    node_executor,
+    SequentialNodeExecutorFunctor)
+
+#endif // FBCODE_CAFFE2
 
 // A manually curated set of ops that are disallowed in static runtime.
 // These are rarely-used ops. Disallowing them typically eliminates
@@ -145,9 +179,9 @@ std::string dumpValueSet(
   std::ostringstream oss;
   oss << set_name << ": {";
   for (const auto* val : value_set) {
-    oss << "%" << val->debugName() << ", ";
+    oss << '%' << val->debugName() << ", ";
   }
-  oss << "}";
+  oss << '}';
   return oss.str();
 }
 
@@ -950,6 +984,20 @@ BlockRunner::BlockRunner(
     }
     pnode.set_metadata(std::move(block_runners));
   }
+
+#ifdef FBCODE_CAFFE2
+  // Initialize the pluggable node executor from the registry. If no executor is
+  // registered, or the registered one opts out (returns nullptr), fall back to
+  // the default sequential execution to preserve baseline semantics.
+  node_executor_owner_ = SRNodeExecutorRegistry()->Create("node_executor");
+  if (node_executor_owner_ != nullptr) {
+    node_executor_fn_ = node_executor_owner_->Create(
+        block_info_, sm.opts(), &node_executor_ctx_);
+  }
+  if (node_executor_fn_ == nullptr) {
+    node_executor_fn_ = &sequentialExecute;
+  }
+#endif
 }
 
 BlockRunner::BlockRunner(BlockRunner&&) noexcept = default;
@@ -1322,12 +1370,18 @@ c10::IValue BlockRunner::run_impl(
 
     set_inputs(std::forward<IValueList>(args), kwargs);
 
+#ifdef FBCODE_CAFFE2
+    DCHECK(node_executor_fn_ != nullptr);
+    node_executor_fn_(*this, nodes_.data(), nodes_.size(), node_executor_ctx_);
+#else
     for (auto& n : nodes_) {
       // LOG(INFO) << "Running node: " << PrintNode(n.node());
       n.run();
       // Check for incorrect schema alias info.
       verify_and_correct_memory_overlap(n);
     }
+#endif
+
     on_exit.setFinished();
   }
 
@@ -1521,7 +1575,7 @@ void BlockRunner::benchmark(
     } else if (results.native_nodes.count(kind)) {
       std::cout << ", native)" << '\n';
     } else {
-      std::cout << ")" << '\n';
+      std::cout << ')' << '\n';
     }
 
     if (generate_ai_pep_output) {
@@ -1566,13 +1620,13 @@ void BlockRunner::benchmark(
   auto unsupported_nodes_count = results.total_nodes_count -
       results.out_nodes_count - results.native_nodes.size();
   std::cout << "Total number of 'out' variant nodes/total number of nodes: "
-            << results.out_nodes_count << "/" << results.total_nodes_count
+            << results.out_nodes_count << '/' << results.total_nodes_count
             << " ("
             << 100.0 * static_cast<float>(results.out_nodes_count) /
           static_cast<float>(results.total_nodes_count)
             << "%)" << '\n';
   std::cout << "Total number of nodes not covered by SR/total number of nodes: "
-            << unsupported_nodes_count << "/" << results.total_nodes_count
+            << unsupported_nodes_count << '/' << results.total_nodes_count
             << " ("
             << 100.0 * static_cast<float>(unsupported_nodes_count) /
           static_cast<float>(results.total_nodes_count)
@@ -2138,7 +2192,7 @@ static bool checkNoMemoryOverlap(const at::Tensor& a, const at::Tensor& b) {
 }
 
 bool ProcessedNode::verify_no_memory_overlap(bool force_check) const {
-  const static std::array<c10::Symbol, 7> special_case_ops = {
+  const static auto special_case_ops = {
       fromQualString("prim::TypeCheck"),
       fromQualString("prim::IfThenElse"),
       fromQualString("static_runtime::select_tensor"),

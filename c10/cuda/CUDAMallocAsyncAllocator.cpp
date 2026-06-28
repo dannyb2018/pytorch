@@ -320,7 +320,7 @@ void mallocAsync(
   TORCH_INTERNAL_ASSERT(
       0 <= device && device < device_count,
       "Invalid device index ",
-      device,
+      static_cast<int>(device),
       ": did you call init?");
 
   // If stream is a null (default) stream,
@@ -370,7 +370,7 @@ void mallocAsync(
         OutOfMemoryError,
         false,
         "Allocation on device ",
-        device,
+        static_cast<int>(device),
         " would exceed allowed memory. (out of memory)",
         "\nCurrently allocated     : ",
         format_size(pytorch_used_bytes[device]),
@@ -653,7 +653,8 @@ struct CudaMallocAsyncAllocator : public CUDAAllocator {
       CreateContextFn context_recorder,
       size_t alloc_trace_max_entries,
       RecordContext when,
-      bool clearHistory) override {
+      bool clearHistory,
+      const std::vector<std::string>& skip_actions) override {
     TORCH_CHECK(
         false,
         "cudaMallocAsync does not yet support recordHistory. "
@@ -664,6 +665,13 @@ struct CudaMallocAsyncAllocator : public CUDAAllocator {
     TORCH_CHECK(
         false,
         "cudaMallocAsync does not yet support attachOutOfMemoryObserver. "
+        "If you need it, please file an issue describing your use case.");
+  }
+
+  void attachOomRejectionObserver(OomRejectionObserver observer) override {
+    TORCH_CHECK(
+        false,
+        "cudaMallocAsync does not yet support attachOomRejectionObserver. "
         "If you need it, please file an issue describing your use case.");
   }
 
@@ -782,15 +790,13 @@ struct CudaMallocAsyncAllocator : public CUDAAllocator {
         cudaMemPoolSetAttribute(mempool, cudaMemPoolAttrUsedMemHigh, &zero));
   }
 
-  SnapshotInfo snapshot(MempoolId_t mempool_id) override {
+  SnapshotInfo snapshot(MempoolId_t mempool_id, bool include_traces) override {
     TORCH_CHECK(
         false,
         "Calling snapshot with backend:cudaMallocAsync is not meaningful. "
         "(For backend:native, snapshot returns a detailed summary of all "
         "blocks tracked by the allocator, but the cudaMallocAsync backend "
         "does not track individual blocks.)");
-    // Alternative: TORCH_WARN
-    return {};
   }
 
   // CUDAGraph interactions

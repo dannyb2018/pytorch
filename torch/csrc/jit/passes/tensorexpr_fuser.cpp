@@ -5,7 +5,6 @@
 #include <ATen/record_function.h>
 #include <c10/util/FunctionRef.h>
 #include <c10/util/irange.h>
-#include <torch/csrc/jit/codegen/cuda/interface.h>
 #include <torch/csrc/jit/codegen/fuser/interface.h>
 #include <torch/csrc/jit/ir/alias_analysis.h>
 #include <torch/csrc/jit/jit_log.h>
@@ -13,7 +12,6 @@
 #include <torch/csrc/jit/passes/common_subexpression_elimination.h>
 #include <torch/csrc/jit/passes/constant_pooling.h>
 #include <torch/csrc/jit/passes/dead_code_elimination.h>
-#include <torch/csrc/jit/passes/pass_manager.h>
 #include <torch/csrc/jit/passes/remove_redundant_profiles.h>
 #include <torch/csrc/jit/passes/symbolic_shape_runtime_fusion.h>
 #include <torch/csrc/jit/passes/utils/subgraph_utils.h>
@@ -1014,7 +1012,7 @@ class TensorExprFuser {
         return false;
       }
       // non_blocking only applies in cross-device conversion, which we bail on
-      // copy arg only applies if op is a no-op, which we dont start fusion
+      // copy arg only applies if op is a no-op, which we don't start fusion
       // group from memory format is separately handled in NNC output
 
       // all non-Tensor arguments must be constant

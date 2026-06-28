@@ -17,12 +17,10 @@
 #include <torch/csrc/jit/mobile/observer.h>
 #include <torch/csrc/jit/mobile/type_parser.h>
 #include <torch/csrc/jit/mobile/upgrader_mobile.h>
-#include <torch/csrc/jit/runtime/instruction.h>
 #include <torch/csrc/jit/serialization/import_export_constants.h>
 #include <torch/csrc/jit/serialization/import_export_functions.h>
 #include <torch/csrc/jit/serialization/import_read.h>
 #include <torch/custom_class.h>
-#include <torch/library.h>
 #include <optional>
 #include <string>
 #include <vector>
@@ -527,7 +525,7 @@ mobile::Module _load_for_mobile_impl(
     // https://www.internalfb.com/code/fbsource/[9996fcb7a6fb]/fbcode/caffe2/torch/csrc/jit/mobile/import.cpp?lines=427-434
     std::vector<std::string> all_files = reader->getAllRecords();
     for (auto& file_name : all_files) {
-      if (file_name.find("extra/") == 0) {
+      if (file_name.starts_with("extra/")) {
         extra_files[file_name.substr(6)] = "";
       }
     }

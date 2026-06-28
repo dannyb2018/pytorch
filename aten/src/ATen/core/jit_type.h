@@ -211,8 +211,8 @@ struct TORCH_API OptionalType : public UnionType {
 
   std::string str() const override {
     std::stringstream ss;
-    ss << getElementType()->str() << "?";
-    return ss.str();
+    ss << getElementType()->str() << '?';
+    return std::move(ss).str();
   }
 
   TypePtr createWithContained(
@@ -240,8 +240,8 @@ struct TORCH_API OptionalType : public UnionType {
 
   std::string annotation_str_impl(const TypePrinter& printer = nullptr) const override {
     std::stringstream ss;
-    ss << "Optional[" << getElementType()->annotation_str(printer) << "]";
-    return ss.str();
+    ss << "Optional[" << getElementType()->annotation_str(printer) << ']';
+    return std::move(ss).str();
   }
 };
 
@@ -371,7 +371,7 @@ inline ShapeSymbol merge_primitive(
 // dims, partially known and fully known shapes are all supported.
 struct TORCH_API SymbolicShape {
   // Unranked shape constructor.
-  SymbolicShape() : dims_(std::nullopt) {}
+  SymbolicShape() = default;
 
   // Known rank but unknown dimensions.
   SymbolicShape(std::optional<size_t> rank) : dims_(std::nullopt) {
@@ -873,7 +873,7 @@ struct TORCH_API ListType
   std::string str() const override {
     std::stringstream ss;
     ss << getElementType()->str() << "[]";
-    return ss.str();
+    return std::move(ss).str();
   }
   TypePtr createWithContained(
       std::vector<TypePtr> contained_types) const override {
@@ -887,7 +887,7 @@ struct TORCH_API ListType
   // this function will return the global singleton type pointer
   // the type List<T>.
   // The extra "identifier" argument is needed because we have multiple container types
-  // that all re-use this function (List<T>, array<T, N>, etc.)
+  // that all reuse this function (List<T>, array<T, N>, etc.)
   static TypePtr get(const std::string& identifier, TypePtr inner);
 
   // common cast List[Tensor]
@@ -906,8 +906,8 @@ struct TORCH_API ListType
 
   std::string annotation_str_impl(const TypePrinter& printer = nullptr) const override {
     std::stringstream ss;
-    ss << "List[" << getElementType()->annotation_str(printer) << "]";
-    return ss.str();
+    ss << "List[" << getElementType()->annotation_str(printer) << ']';
+    return std::move(ss).str();
   }
 };
 
@@ -946,8 +946,8 @@ struct TORCH_API DictType : public SharedType {
   std::string str() const override {
     std::stringstream ss;
     ss << "Dict(" << getKeyType()->str() << ", " << getValueType()->str()
-       << ")";
-    return ss.str();
+       << ')';
+    return std::move(ss).str();
   }
 
   TypePtr createWithContained(
@@ -985,7 +985,7 @@ struct TORCH_API DictType : public SharedType {
   // this function will return the global singleton type pointer
   // the type List<T>.
   // The extra "identifier" argument is needed because we have multiple container types
-  // that all re-use this function (Dict<K, V> and unordered_map<K, V>)
+  // that all reuse this function (Dict<K, V> and unordered_map<K, V>)
   static TypePtr get(const std::string& identifier, TypePtr key, TypePtr val);
 
  private:
@@ -1018,8 +1018,8 @@ struct TORCH_API FutureType
 
   std::string str() const override {
     std::stringstream ss;
-    ss << "Future(" << getElementType()->str() << ")";
-    return ss.str();
+    ss << "Future(" << getElementType()->str() << ')';
+    return std::move(ss).str();
   }
   TypePtr createWithContained(
       std::vector<TypePtr> contained_types) const override {
@@ -1041,8 +1041,8 @@ struct TORCH_API FutureType
 
   std::string annotation_str_impl(const TypePrinter& printer = nullptr) const override {
     std::stringstream ss;
-    ss << "Future[" << getElementType()->annotation_str(printer) << "]";
-    return ss.str();
+    ss << "Future[" << getElementType()->annotation_str(printer) << ']';
+    return std::move(ss).str();
   }
 };
 
@@ -1060,8 +1060,8 @@ struct TORCH_API AwaitType
 
   std::string str() const override {
     std::stringstream ss;
-    ss << "Await(" << getElementType()->str() << ")";
-    return ss.str();
+    ss << "Await(" << getElementType()->str() << ')';
+    return std::move(ss).str();
   }
   TypePtr createWithContained(
       std::vector<TypePtr> contained_types) const override {
@@ -1083,8 +1083,8 @@ struct TORCH_API AwaitType
 
   std::string annotation_str_impl(const TypePrinter& printer = nullptr) const override {
     std::stringstream ss;
-    ss << "Await[" << getElementType()->annotation_str(printer) << "]";
-    return ss.str();
+    ss << "Await[" << getElementType()->annotation_str(printer) << ']';
+    return std::move(ss).str();
   }
 };
 
@@ -1102,8 +1102,8 @@ struct TORCH_API RRefType
 
   std::string str() const override {
     std::stringstream ss;
-    ss << "RRef(" << getElementType()->str() << ")";
-    return ss.str();
+    ss << "RRef(" << getElementType()->str() << ')';
+    return std::move(ss).str();
   }
   TypePtr createWithContained(
       std::vector<TypePtr> contained_types) const override {
@@ -1115,8 +1115,8 @@ struct TORCH_API RRefType
 
   std::string annotation_str_impl(const TypePrinter& printer = nullptr) const override {
     std::stringstream ss;
-    ss << "RRef[" << getElementType()->annotation_str(printer) << "]";
-    return ss.str();
+    ss << "RRef[" << getElementType()->annotation_str(printer) << ']';
+    return std::move(ss).str();
   }
 };
 
@@ -1955,12 +1955,6 @@ struct getTypePtr_<std::string_view> final {
     return StringType::get();
   }
 };
-template <>
-struct getTypePtr_<at::Dimname> final {
-  static decltype(auto) call() {
-    return StringType::get();
-  }
-};
 template <class T, bool fake>
 struct getMaybeFakeTypePtr_<std::vector<T>, fake> final {
   static const auto& call() {
@@ -2243,7 +2237,7 @@ static const TypeKind Kind = TypeKind::ScalarTypeType;
 static ScalarTypeTypePtr get();
 
 private:
-ScalarTypeType()  {}
+ScalarTypeType() = default;
 };
 
 struct MemoryFormatType;
@@ -2257,7 +2251,7 @@ static const TypeKind Kind = TypeKind::MemoryFormatType;
 static MemoryFormatTypePtr get();
 
 private:
-MemoryFormatType()  {}
+MemoryFormatType() = default;
 };
 
 struct LayoutType;
@@ -2271,7 +2265,7 @@ static const TypeKind Kind = TypeKind::LayoutType;
 static LayoutTypePtr get();
 
 private:
-LayoutType()  {}
+LayoutType() = default;
 };
 
 namespace detail {

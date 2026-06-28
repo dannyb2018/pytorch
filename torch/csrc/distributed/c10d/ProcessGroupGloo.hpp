@@ -242,7 +242,7 @@ class TORCH_API ProcessGroupGloo : public Backend {
    protected:
     at::Tensor tensor_;
     std::unique_ptr<::gloo::transport::UnboundBuffer> buffer_;
-    int srcRank_;
+    int srcRank_{-1};
     const uint64_t seq_;
   };
 
@@ -260,7 +260,7 @@ class TORCH_API ProcessGroupGloo : public Backend {
         std::chrono::milliseconds timeout = kBackendDefaultTimeout);
 
     std::vector<std::shared_ptr<::gloo::transport::Device>> devices;
-    int threads;
+    int threads{2};
   };
 
   const std::string getBackendName() const override {
@@ -268,6 +268,10 @@ class TORCH_API ProcessGroupGloo : public Backend {
   }
 
   bool supportsSplitting() const override {
+    return true;
+  }
+
+  bool supportsReconfigure() const override {
     return true;
   }
 
@@ -326,6 +330,10 @@ class TORCH_API ProcessGroupGloo : public Backend {
       const int& rank,
       const int& size) override;
 
+  ReconfigureHandle get_reconfigure_handle() const override;
+
+  c10::intrusive_ptr<Work> reconfigure(const ReconfigureOptions& opts) override;
+
   const std::vector<uint64_t>& groupRanks() const;
 
   c10::intrusive_ptr<Work> broadcast(
@@ -349,12 +357,12 @@ class TORCH_API ProcessGroupGloo : public Backend {
       std::vector<at::Tensor>& tensors,
       const ReduceOptions& opts = ReduceOptions()) override;
 
-  c10::intrusive_ptr<Work> _reduce_scatter_base(
+  c10::intrusive_ptr<Work> reduce_scatter_single(
       at::Tensor& outputTensor,
       at::Tensor& inputTensor,
       const ReduceScatterOptions& opts = ReduceScatterOptions()) override;
 
-  c10::intrusive_ptr<Work> _allgather_base(
+  c10::intrusive_ptr<Work> all_gather_single(
       at::Tensor& output_tensor,
       at::Tensor& input_tensor,
       const AllgatherOptions& opts = AllgatherOptions()) override;
@@ -369,7 +377,7 @@ class TORCH_API ProcessGroupGloo : public Backend {
       std::vector<at::Tensor>& input_list,
       const AllgatherOptions& opts = AllgatherOptions()) override;
 
-  c10::intrusive_ptr<Work> allgather_into_tensor_coalesced(
+  c10::intrusive_ptr<Work> all_gather_single_coalesced(
       std::vector<at::Tensor>& outputs,
       std::vector<at::Tensor>& inputs,
       const AllgatherOptions& opts = AllgatherOptions()) override;
@@ -389,16 +397,21 @@ class TORCH_API ProcessGroupGloo : public Backend {
       std::vector<std::vector<at::Tensor>>& inputs,
       const ReduceScatterOptions& opts = ReduceScatterOptions()) override;
 
-  c10::intrusive_ptr<Work> reduce_scatter_tensor_coalesced(
+  c10::intrusive_ptr<Work> reduce_scatter_single_coalesced(
       std::vector<at::Tensor>& outputTensors,
       std::vector<at::Tensor>& inputTensors,
       const ReduceScatterOptions& opts = ReduceScatterOptions()) override;
 
-  c10::intrusive_ptr<Work> alltoall_base(
+  c10::intrusive_ptr<Work> all_to_all_single(
       at::Tensor& outputTensor,
       at::Tensor& inputTensor,
       std::vector<int64_t>& outputCounts,
       std::vector<int64_t>& inputCounts,
+      const AllToAllOptions& opts = AllToAllOptions()) override;
+
+  c10::intrusive_ptr<Work> alltoall(
+      std::vector<at::Tensor>& outputTensors,
+      std::vector<at::Tensor>& inputTensors,
       const AllToAllOptions& opts = AllToAllOptions()) override;
 
   c10::intrusive_ptr<Work> send(
@@ -448,19 +461,23 @@ class TORCH_API ProcessGroupGloo : public Backend {
  protected:
   std::shared_ptr<::gloo::rendezvous::Store> store_;
   const c10::intrusive_ptr<Options> options_;
+  c10::intrusive_ptr<Store> c10dStore_;
+
+  bool initialized_{false};
+  int64_t reconfigureUuid_{-1};
 
   // Every Gloo context represents a set of connections to its peers.
   // In order to use more than one device (or allow for parallelism on
   // a single device), you need multiple contexts.
   std::vector<std::shared_ptr<::gloo::Context>> contexts_;
   std::vector<std::thread> threads_;
-  bool stop_;
+  bool stop_{false};
 
   // Incremented for every collective we kick off.
   // The value is used as tag for collective operations. Collectives are kicked
   // off in identical order across processes. Therefore the tag can be used
   // to match up operations during concurrent execution.
-  uint32_t collectiveCounter_;
+  uint32_t collectiveCounter_{0};
 
   // Returns next collective tag to use (uses collectiveCounter_).
   uint32_t nextTag();
@@ -469,6 +486,13 @@ class TORCH_API ProcessGroupGloo : public Backend {
   // With `nextTag` returning an increasing number, this should lead
   // to contexts being used in a round-robin fashion.
   std::shared_ptr<::gloo::Context> getContext(uint32_t tag);
+
+  void checkInitialized() const;
+
+  void connectContexts(
+      int rank,
+      int size,
+      const c10::intrusive_ptr<Store>& store);
 
   // Entrypoint for worker threads.
   void runLoop(int workerIndex);
@@ -489,6 +513,7 @@ class TORCH_API ProcessGroupGloo : public Backend {
   std::condition_variable workConsumeCV_;
   uint64_t seq_{0};
   size_t local_id_;
+  mutable std::vector<uint64_t> defaultRanks_;
   std::shared_ptr<ProcessGroupStatus> pgStatus_ =
       std::make_shared<ProcessGroupStatus>();
 };

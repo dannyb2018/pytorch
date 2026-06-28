@@ -1,25 +1,17 @@
 #include <torch/csrc/jit/frontend/tracer.h>
 
-#include <ATen/Backtrace.h>
 #include <ATen/ScalarOps.h>
 #include <ATen/TracerMode.h>
 #include <ATen/core/Dict.h>
-#include <ATen/core/functional.h>
 #include <c10/util/Exception.h>
 #include <c10/util/irange.h>
-#include <torch/csrc/autograd/engine.h>
-#include <torch/csrc/autograd/function.h>
 #include <torch/csrc/autograd/variable.h>
 #include <torch/csrc/jit/api/module.h>
 #include <torch/csrc/jit/ir/constants.h>
 #include <torch/csrc/jit/ir/ir.h>
-#include <torch/csrc/jit/passes/dead_code_elimination.h>
 #include <torch/csrc/jit/passes/fixup_trace_scope_blocks.h>
 #include <torch/csrc/jit/passes/inliner.h>
-#include <torch/csrc/jit/passes/lower_tuples.h>
 #include <torch/csrc/jit/passes/normalize_ops.h>
-#include <torch/csrc/jit/passes/remove_expands.h>
-#include <torch/csrc/utils/variadic.h>
 #include <torch/custom_class.h>
 
 #include <memory>
@@ -537,7 +529,7 @@ std::pair<std::shared_ptr<TracingState>, Stack> trace(
     }
     FixupTraceScopeBlocks(graph, self);
     NormalizeOps(graph);
-    return {state, out_stack};
+    return {std::move(state), std::move(out_stack)};
   } catch (...) {
     tracer::abandon();
     throw;
@@ -726,12 +718,6 @@ void addInputs(
     const char* name,
     const std::optional<at::Device>& value) {
   detail::genericAddOptionalInput(n, name, value);
-}
-void addInputs(
-    Node* n,
-    const char* name,
-    std::optional<at::DimnameList> value) {
-  TORCH_CHECK(false, "NYI: Named tensors are not supported with the tracer");
 }
 void addInputs(
     Node* n,
@@ -995,7 +981,7 @@ void ensureUniqueIfOutOfPlaced(const char* name, const at::Tensor& tensor) {
        << "that also reference this data will not reflect this change in the trace! "
        << "On the other hand, if all other views use the same memory chunk, but are disjoint (e.g. "
        << "are outputs of torch.split), this might still be safe.";
-    warn(ss.str().c_str());
+    warn(std::move(ss).str().c_str());
   }
 }
 void ensureUniqueIfOutOfPlaced(

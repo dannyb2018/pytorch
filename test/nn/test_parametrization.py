@@ -199,9 +199,7 @@ class TestNNParametrization(NNTestCase):
         self.assertTrue(parametrize.is_parametrized(model, "bias"))
         self.assertEqual(model.bias[0].item(), 0.0)
         self.assertEqual(model.bias[-1].item(), 0.0)
-        self.assertEqual(
-            len(list(model.parameters())), 2
-        )  # Nothing weird has happpened
+        self.assertEqual(len(list(model.parameters())), 2)  # Nothing weird has happened
         # Should not throw
 
         sgd = torch.optim.SGD(model.parameters(), lr=0.01)
@@ -1919,8 +1917,7 @@ class TestNNParametrizationDevice(NNTestCase):
             self.assertEqual(m(input), expected_output)
 
 
-only_for = ("cpu", "cuda")
-instantiate_device_type_tests(TestNNParametrizationDevice, globals(), only_for=only_for)
+instantiate_device_type_tests(TestNNParametrizationDevice, globals())
 instantiate_parametrized_tests(TestNNParametrization)
 
 if __name__ == "__main__":

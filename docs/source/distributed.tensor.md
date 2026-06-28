@@ -88,6 +88,12 @@ DTensor supports the following types of {class}`Placement` on each {class}`Devic
 ```
 
 ```{eval-rst}
+.. autoclass:: _StridedShard
+  :members:
+  :undoc-members:
+```
+
+```{eval-rst}
 .. autoclass:: Replicate
   :members:
   :undoc-members:
@@ -100,7 +106,7 @@ DTensor supports the following types of {class}`Placement` on each {class}`Devic
 ```
 
 ```{eval-rst}
-.. autoclass:: MaskPartial
+.. autoclass:: _MaskPartial
   :members:
   :undoc-members:
 ```
@@ -174,6 +180,10 @@ specifying the {class}`DeviceMesh` and {class}`Placement` for the {class}`DTenso
 
 ```{eval-rst}
 .. autofunction:: full
+```
+
+```{eval-rst}
+.. autofunction:: logspace
 ```
 
 ```{eval-rst}
@@ -258,7 +268,10 @@ these features.
 
 ```{eval-rst}
 .. autofunction:: register_sharding
+```
 
+```{eval-rst}
+.. autofunction:: implicit_replication
 ```
 
 % modules that are missing docs, add the doc later when necessary
